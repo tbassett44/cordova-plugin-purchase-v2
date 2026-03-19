@@ -1,10 +1,17 @@
 # Cordova Purchase Plugin
 
 > In-App Purchases for Cordova
+Forked from [j3k0/cordova-plugin-purchase](https://github.com/j3k0/cordova-plugin-purchase) to add server-side IAP validation, webhook handling, and Upgrade to StoreKit 2.
+
+Current State / Developer Notes:
+-- Reasonbly tested on iOS / Cordova, not tested on Android.
+-- iOS is likely not backward compatible with original plugin...or at least i havent tested or tried a migration.
+-- Not tested with Capcitor / Ionic
+-- Android version currently remains unchanged from original plugin.
 
 ---
 
-Need professional help and support? [Contact Me](mailto:hoelt@fovea.cc).
+Need professional help and support? [Contact Me](mailto:juicy@actualize.earth).
 
 ## Summary
 
@@ -28,14 +35,55 @@ The Cordova-Plugin-Purchase plugin is designed to be easy to use and integrate i
 | payment requests |   |   | ✅ |
 | [receipt validation](https://www.iaptic.com) | ✅ | ✅ | ✅ |
 
+### Platform Requirements
+
+| Platform | Minimum Version | Notes |
+|----------|-----------------|-------|
+| **iOS** | 15.0+ | StoreKit 2 (Swift) |
+| **macOS** | 12.0+ | StoreKit 2 (Swift) |
+| **Android** | SDK 23+ | Google Play Billing Library 8.3.0 |
+
+> **iOS/macOS Note:** This plugin uses **StoreKit 2**, Apple's modern Swift-based in-app purchase framework. StoreKit 2 provides JWS-signed transactions, built-in verification, and improved subscription handling. See the [StoreKit 2 Migration Guide](doc/storekit2-migration.md) for details.
+
 ## Installation
 
 ### Install the plugin (Cordova)
 
 ```sh
-cordova plugin add "cordova-plugin-purchase"
+cordova plugin add "cordova-plugin-purchase" --variable SWIFTVERSION="5.5"
 ```
 
+> **Important:** The `--variable SWIFTVERSION="5.5"` flag is required for iOS/macOS builds. This plugin uses StoreKit 2 which requires Swift 5.5+ for async/await support.
+
+## Development
+
+### Building from Source
+
+The plugin's JavaScript is compiled from TypeScript sources located in `src/ts/`. After modifying TypeScript files, you must recompile:
+
+```bash
+# Install dependencies (first time only)
+npm install
+
+# Compile TypeScript to JavaScript
+make compile
+```
+
+This compiles the TypeScript source files and outputs to:
+- `www/store.js` - Main plugin JavaScript
+- `www/store.d.ts` - TypeScript type definitions
+
+### Available Make Commands
+
+| Command | Description |
+|---------|-------------|
+| `make compile` | Compile TypeScript to JavaScript |
+| `make build` | Compile and run tests |
+| `make test` | Run unit tests |
+| `make doc` | Generate API documentation |
+| `make javalint` | Check Java code syntax |
+| `make clean` | Remove temporary files |
+| `make help` | Show all available commands |
 
 ### Recommended plugins
 
@@ -235,6 +283,117 @@ For a more complete example with a backend integration, check:
 - Client: https://github.com/j3k0/cordova-subscription-example
 - Server: https://github.com/iaptic/iaptic-example-nodejs-backend
 
+## Server-Side IAP Service (purchase_api.js)
+
+This plugin includes a standalone **Node.js/Express IAP service** (`purchase_api.js`) that handles server-side receipt validation, webhooks, and entitlement management for both Apple App Store and Google Play.
+
+### Features
+
+| Feature | Apple | Google |
+|---------|-------|--------|
+| Receipt/JWS Validation | ✅ | ✅ |
+| Server Notifications (Webhooks) | ✅ App Store Server Notifications v2 | ✅ Real-time Developer Notifications (RTDN) |
+| Restore Purchases | ✅ | - |
+| Entitlement Status Lookup | ✅ | ✅ |
+| Debug/Auth Testing | ✅ | - |
+
+### Installation
+
+```bash
+npm install express googleapis @apple/app-store-server-library node-fetch
+```
+
+### Configuration
+
+Add an `iap` section to your config file:
+
+```json
+{
+  "iap": {
+    "port": 3335,
+    "apple": {
+      "file_path": "/var/www/priv/iap.apple.p8",
+      "APPLE_ISSUER_ID": "your-issuer-id",
+      "APPLE_KEY_ID": "your-key-id",
+      "APPLE_PRIVATE_KEY": [
+        "-----BEGIN PRIVATE KEY-----",
+        "...your private key lines...",
+        "-----END PRIVATE KEY-----"
+      ],
+      "APPLE_BUNDLE_ID": "com.your.app",
+      "APPLE_APPLE_ID": "123456789",
+      "APPLE_ENVIRONMENT": "sandbox"
+    }
+  }
+}
+```
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/iap/health` | Health check |
+| `GET` | `/iap/debug/apple-auth` | Test Apple credentials |
+| `GET` | `/iap/status?userId=...` | Get user's entitlement status |
+| `POST` | `/iap/validate/apple` | Validate Apple JWS transaction |
+| `POST` | `/iap/validate/google` | Validate Google purchase |
+| `POST` | `/iap/restore/apple` | Restore Apple purchases |
+| `POST` | `/iap/webhook/apple` | Apple Server Notifications v2 |
+| `POST` | `/iap/webhook/google` | Google RTDN Pub/Sub webhook |
+
+### Example: Validate Apple Purchase
+
+```javascript
+// Client-side after purchase
+const response = await fetch('https://your-server.com/iap/validate/apple', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    userId: 'user123',
+    signedTransaction: jwsToken  // From StoreKit 2
+  })
+});
+```
+
+### Example: Restore Purchases
+
+```javascript
+// After calling CdvPurchase.store.restorePurchases()
+const response = await fetch('https://your-server.com/iap/restore/apple', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    userId: 'user123',
+    transactions: [
+      { signedTransaction: 'jws-token-1' },
+      { signedTransaction: 'jws-token-2' }
+    ]
+  })
+});
+```
+
+### Running the Service
+
+```bash
+# Direct
+node purchase_api.js
+
+# With PM2
+pm2 start purchase_api.js --name iap --time
+```
+
+### Apple Webhook Setup
+
+1. In App Store Connect, go to **App Information** → **App Store Server Notifications**
+2. Set the URL to: `https://your-server.com/iap/webhook/apple`
+3. Select **Version 2** notifications
+
+### Google RTDN Setup
+
+1. Create a Pub/Sub topic in Google Cloud Console
+2. Configure a push subscription pointing to: `https://your-server.com/iap/webhook/google?userId=...`
+3. Link the topic to your Play Console app
+
 ## Extra Resources
 
 ### For iOS
@@ -246,16 +405,6 @@ For a more complete example with a backend integration, check:
 
  - [Braintree SDK](https://github.com/j3k0/cordova-plugin-purchase-braintree)
    - Add the Braintree SDK to your application, enable Braintree on iOS and Android.
-
-### Subscriptions
-
-For proper subscription support, you need a receipt validation server. You can
-implement your own or use [Iaptic's receipt validation service](https://www.iaptic.com).
-
-Here is a full example of a cordova application implementing subscriptions, with and without a backend server:
-
-- Client: https://github.com/j3k0/cordova-subscription-example
-- Server: https://github.com/iaptic/iaptic-example-nodejs-backend
 
 # Contribute
 

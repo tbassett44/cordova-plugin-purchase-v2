@@ -24,9 +24,9 @@ SOFTWARE.
 -->
 
 <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
-    id="cordova-plugin-purchase"
+    id="cordova-plugin-purchase-v2"
     xmlns:android="http://schemas.android.com/apk/res/android"
-    version="13.13.1">
+    version="13.13.11">
 
     <name>Purchase</name>
 	<description>Cordova Purchase plugin for iOS (AppStore), Android (PlayStore) and Windows</description>
@@ -42,7 +42,6 @@ SOFTWARE.
 
     <!-- ios -->
     <platform name="ios">
-        <!-- dependency id="cordova-plugin-add-swift-support" version="2.0.2" / -->
         <js-module src="www/store.js" name="CdvPurchase">
             <clobbers target="CdvPurchase" />
             <clobbers target="store" />
@@ -59,17 +58,16 @@ SOFTWARE.
             </feature>
         </config-file>
 
-        <header-file src="src/ios/InAppPurchase.h" />
-        <source-file src="src/ios/InAppPurchase.m" />
-        <header-file src="src/ios/SKProduct+LocalizedPrice.h" />
-        <source-file src="src/ios/SKProduct+LocalizedPrice.m" />
-        <header-file src="src/ios/SKProductDiscount+LocalizedPrice.h" />
-        <source-file src="src/ios/SKProductDiscount+LocalizedPrice.m" />
+        <!-- Swift StoreKit 2 Implementation (iOS 15+) -->
+        <source-file src="src/ios/InAppPurchase.swift" />
 
+        <!-- Swift version requirement for async/await -->
+        <preference name="SwiftVersion" value="5.5" />
+        <preference name="SWIFTVERSION" value="5.5" />
         <framework src="StoreKit.framework" />
     </platform>
 
-    <!-- osx -->
+    <!-- osx (macOS 12+) -->
     <platform name="osx">
         <js-module src="www/store.js" name="CdvPurchase">
             <clobbers target="CdvPurchase" />
@@ -88,12 +86,11 @@ SOFTWARE.
             </feature>
         </config-file>
 
-        <header-file src="src/ios/InAppPurchase.h" />
-        <source-file src="src/ios/InAppPurchase.m" />
-        <header-file src="src/ios/SKProduct+LocalizedPrice.h" />
-        <source-file src="src/ios/SKProduct+LocalizedPrice.m" />
-        <header-file src="src/ios/SKProductDiscount+LocalizedPrice.h" />
-        <source-file src="src/ios/SKProductDiscount+LocalizedPrice.m" />
+        <!-- Swift StoreKit 2 Implementation (macOS 12+) -->
+        <source-file src="src/ios/InAppPurchase.swift" />
+
+        <!-- Swift version requirement for async/await -->
+        <preference name="SwiftVersion" value="5.5" />
 
         <framework src="StoreKit.framework" />
     </platform>

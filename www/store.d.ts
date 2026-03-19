@@ -817,7 +817,7 @@ declare namespace CdvPurchase {
     /**
      * Current release number of the plugin.
      */
-    const PLUGIN_VERSION = "13.13.0";
+    const PLUGIN_VERSION = "13.13.1";
     /**
      * Entry class of the plugin.
      */
@@ -2741,7 +2741,7 @@ declare namespace CdvPurchase {
                 /** Called when the bridge is ready (after setup) */
                 ready: () => void;
                 /** Called when a transaction is in "Purchased" state */
-                purchased: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string) => void;
+                purchased: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string) => void;
                 /** Called when a transaction has been enqueued */
                 purchaseEnqueued: (productId: string, quantity: number) => void;
                 /**
@@ -2766,6 +2766,8 @@ declare namespace CdvPurchase {
                 restoreFailed: (errorCode: ErrorCode) => void;
                 /** Called when a call to "restore" is complete */
                 restoreCompleted: () => void;
+                /** Called for each transaction during restore with JWS token */
+                restoreTransactionUpdated: (transactionIdentifier: string, productId: string, jwsRepresentation: string, originalTransactionIdentifier?: string, transactionDate?: string, expirationDate?: string) => void;
             }
             export interface BridgeOptions extends BridgeCallbacks {
                 /** Custom logger for the bridge */
@@ -2790,6 +2792,15 @@ declare namespace CdvPurchase {
                 private registeredProducts;
                 /** True if "restoreCompleted" or "restoreFailed" should be called when restore is done */
                 private needRestoreNotification;
+                /** Transactions collected during restore (with JWS tokens) */
+                restoredTransactions: {
+                    transactionIdentifier: string;
+                    productId: string;
+                    jwsRepresentation: string;
+                    originalTransactionIdentifier?: string;
+                    transactionDate?: string;
+                    expirationDate?: string;
+                }[];
                 /** List of transaction updates to process */
                 private pendingUpdates;
                 constructor();
@@ -2852,9 +2863,30 @@ declare namespace CdvPurchase {
                 finish(transactionId: string, success: () => void, error: (msg: string) => void): void;
                 finalizeTransactionUpdates(): void;
                 lastTransactionUpdated(): void;
-                transactionUpdated(state: TransactionState, errorCode: ErrorCode | undefined, errorText: string | undefined, transactionIdentifier: string, productId: string, transactionReceipt: never, originalTransactionIdentifier: string | undefined, transactionDate: string | undefined, discountId: string | undefined): void;
+                transactionUpdated(state: TransactionState, errorCode: ErrorCode | undefined, errorText: string | undefined, transactionIdentifier: string, productId: string, transactionReceipt: never, originalTransactionIdentifier: string | undefined, transactionDate: string | undefined, discountId: string | undefined, expirationDate: string | undefined): void;
                 restoreCompletedTransactionsFinished(): void;
                 restoreCompletedTransactionsFailed(errorCode: ErrorCode): void;
+                /**
+                 * Called from native for each transaction during restore.
+                 * Collects the JWS token for server-side verification.
+                 */
+                restoreTransactionUpdated(transactionIdentifier: string, productId: string, jwsRepresentation: string, originalTransactionIdentifier?: string, transactionDate?: string, expirationDate?: string): void;
+                /**
+                 * Clear the collected restore transactions.
+                 * Call this before starting a new restore.
+                 */
+                clearRestoredTransactions(): void;
+                /**
+                 * Get all collected restore transactions with JWS tokens.
+                 */
+                getRestoredTransactions(): {
+                    transactionIdentifier: string;
+                    productId: string;
+                    jwsRepresentation: string;
+                    originalTransactionIdentifier?: string | undefined;
+                    transactionDate?: string | undefined;
+                    expirationDate?: string | undefined;
+                }[];
                 parseReceiptArgs(args: RawReceiptArgs): ApplicationReceipt;
                 refreshReceipts(successCb: (receipt: ApplicationReceipt) => void, errorCb: (code: ErrorCode, message: string) => void): void;
                 loadReceipts(callback: (receipt: ApplicationReceipt) => void, errorCb: (code: ErrorCode, message: string) => void): void;
@@ -2938,7 +2970,7 @@ declare namespace CdvPurchase {
         /** StoreKit transaction */
         class SKTransaction extends Transaction {
             originalTransactionId?: string;
-            refresh(productId?: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string): void;
+            refresh(productId?: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDateMs?: string): void;
         }
     }
 }

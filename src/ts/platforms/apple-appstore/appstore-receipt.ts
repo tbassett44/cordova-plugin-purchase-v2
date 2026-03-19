@@ -42,10 +42,11 @@ namespace CdvPurchase {
 
         originalTransactionId?: string;
 
-        refresh(productId?: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string) {
+        refresh(productId?: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDateMs?: string) {
             if (productId) this.products = [{ id: productId, offerId: discountId }];
             if (originalTransactionIdentifier) this.originalTransactionId = originalTransactionIdentifier;
             if (transactionDate) this.purchaseDate = new Date(+transactionDate);
+            if (expirationDateMs) this.expirationDate = new Date(+expirationDateMs);
         }
     }
   }

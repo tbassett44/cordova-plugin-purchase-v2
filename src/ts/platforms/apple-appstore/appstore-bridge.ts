@@ -175,7 +175,7 @@ namespace CdvPurchase {
                 ready: () => void;
 
                 /** Called when a transaction is in "Purchased" state */
-                purchased: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string) => void;
+                purchased: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string) => void;
 
                 /** Called when a transaction has been enqueued */
                 purchaseEnqueued: (productId: string, quantity: number) => void;
@@ -209,6 +209,9 @@ namespace CdvPurchase {
 
                 /** Called when a call to "restore" is complete */
                 restoreCompleted: () => void;
+
+                /** Called for each transaction during restore with JWS token */
+                restoreTransactionUpdated: (transactionIdentifier: string, productId: string, jwsRepresentation: string, originalTransactionIdentifier?: string, transactionDate?: string, expirationDate?: string) => void;
             }
 
             export interface BridgeOptions extends BridgeCallbacks {
@@ -243,6 +246,16 @@ namespace CdvPurchase {
                 /** True if "restoreCompleted" or "restoreFailed" should be called when restore is done */
                 private needRestoreNotification = false;
 
+                /** Transactions collected during restore (with JWS tokens) */
+                restoredTransactions: {
+                    transactionIdentifier: string;
+                    productId: string;
+                    jwsRepresentation: string;
+                    originalTransactionIdentifier?: string;
+                    transactionDate?: string;
+                    expirationDate?: string;
+                }[] = [];
+
                 /*
                 private eventQueue: {
                     state: TransactionState;
@@ -272,6 +285,7 @@ namespace CdvPurchase {
                     originalTransactionIdentifier: string | undefined;
                     transactionDate: string | undefined;
                     discountId: string | undefined;
+                    expirationDate: string | undefined;
                 }[] = [];
 
                 constructor() {
@@ -291,6 +305,7 @@ namespace CdvPurchase {
                         receiptsRefreshed: noop,
                         restoreFailed: noop,
                         restoreCompleted: noop,
+                        restoreTransactionUpdated: noop,
                     }
 
                     // if (window.localStorage && window.localStorage.sk_transactionForProduct)
@@ -324,6 +339,7 @@ namespace CdvPurchase {
                         receiptsRefreshed: options.receiptsRefreshed || noop,
                         restoreFailed: options.restoreFailed || noop,
                         restoreCompleted: options.restoreCompleted || noop,
+                        restoreTransactionUpdated: options.restoreTransactionUpdated || noop,
                     };
 
                     if (options.debug) {
@@ -415,6 +431,7 @@ namespace CdvPurchase {
                  */
                 restore(callback?: Callback<any>) {
                     this.needRestoreNotification = true;
+                    this.clearRestoredTransactions(); // Clear any previous restore transactions
                     exec('restoreCompletedTransactions', [], callback, callback);
                 }
 
@@ -511,7 +528,7 @@ namespace CdvPurchase {
                 finalizeTransactionUpdates() {
                     for (let i = 0; i < this.pendingUpdates.length; ++i) {
                         const args = this.pendingUpdates[i];
-                        this.transactionUpdated(args.state, args.errorCode, args.errorText, args.transactionIdentifier, args.productId, args.transactionReceipt, args.originalTransactionIdentifier, args.transactionDate, args.discountId);
+                        this.transactionUpdated(args.state, args.errorCode, args.errorText, args.transactionIdentifier, args.productId, args.transactionReceipt, args.originalTransactionIdentifier, args.transactionDate, args.discountId, args.expirationDate);
                     }
                     this.pendingUpdates = [];
                 }
@@ -524,13 +541,13 @@ namespace CdvPurchase {
                 //
                 // Note that it may eventually be called before initialization... unfortunately.
                 // In this case, we'll just keep pending updates in a list for later processing.
-                transactionUpdated(state: TransactionState, errorCode: ErrorCode | undefined, errorText: string | undefined, transactionIdentifier: string, productId: string, transactionReceipt: never, originalTransactionIdentifier: string | undefined, transactionDate: string | undefined, discountId: string | undefined) {
+                transactionUpdated(state: TransactionState, errorCode: ErrorCode | undefined, errorText: string | undefined, transactionIdentifier: string, productId: string, transactionReceipt: never, originalTransactionIdentifier: string | undefined, transactionDate: string | undefined, discountId: string | undefined, expirationDate: string | undefined) {
 
                     if (!this.initialized) {
-                        this.pendingUpdates.push({ state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId });
+                        this.pendingUpdates.push({ state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId, expirationDate });
                         return;
                     }
-                    log("transaction updated:" + transactionIdentifier + " state:" + state + " product:" + productId);
+                    log("transaction updated:" + transactionIdentifier + " state:" + state + " product:" + productId + " expires:" + expirationDate);
 
                     if (productId && transactionIdentifier) {
                         if (this.transactionsForProduct[productId]) {
@@ -546,7 +563,7 @@ namespace CdvPurchase {
                             protectCall(this.options.purchasing, 'options.purchasing', productId);
                             return;
                         case "PaymentTransactionStatePurchased":
-                            protectCall(this.options.purchased, 'options.purchase', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId);
+                            protectCall(this.options.purchased, 'options.purchase', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate);
                             return;
                         case "PaymentTransactionStateDeferred":
                             protectCall(this.options.deferred, 'options.deferred', productId);
@@ -576,6 +593,42 @@ namespace CdvPurchase {
                         return;
                     this.needRestoreNotification = false;
                     protectCall(this.options.restoreFailed, 'options.restoreFailed', errorCode);
+                }
+
+                /**
+                 * Called from native for each transaction during restore.
+                 * Collects the JWS token for server-side verification.
+                 */
+                restoreTransactionUpdated(transactionIdentifier: string, productId: string, jwsRepresentation: string, originalTransactionIdentifier?: string, transactionDate?: string, expirationDate?: string) {
+                    log("restoreTransactionUpdated: " + transactionIdentifier + " product:" + productId + " expires:" + expirationDate);
+
+                    // Store the transaction with JWS for later processing
+                    this.restoredTransactions.push({
+                        transactionIdentifier,
+                        productId,
+                        jwsRepresentation,
+                        originalTransactionIdentifier,
+                        transactionDate,
+                        expirationDate
+                    });
+
+                    // Also call the callback if set
+                    protectCall(this.options.restoreTransactionUpdated, 'options.restoreTransactionUpdated', transactionIdentifier, productId, jwsRepresentation, originalTransactionIdentifier, transactionDate, expirationDate);
+                }
+
+                /**
+                 * Clear the collected restore transactions.
+                 * Call this before starting a new restore.
+                 */
+                clearRestoredTransactions() {
+                    this.restoredTransactions = [];
+                }
+
+                /**
+                 * Get all collected restore transactions with JWS tokens.
+                 */
+                getRestoredTransactions() {
+                    return this.restoredTransactions;
                 }
 
                 parseReceiptArgs(args: RawReceiptArgs): ApplicationReceipt {

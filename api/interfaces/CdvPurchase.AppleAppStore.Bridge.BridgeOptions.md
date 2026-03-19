@@ -26,6 +26,7 @@
 - [receiptsRefreshed](CdvPurchase.AppleAppStore.Bridge.BridgeOptions.md#receiptsrefreshed)
 - [restoreCompleted](CdvPurchase.AppleAppStore.Bridge.BridgeOptions.md#restorecompleted)
 - [restoreFailed](CdvPurchase.AppleAppStore.Bridge.BridgeOptions.md#restorefailed)
+- [restoreTransactionUpdated](CdvPurchase.AppleAppStore.Bridge.BridgeOptions.md#restoretransactionupdated)
 - [restored](CdvPurchase.AppleAppStore.Bridge.BridgeOptions.md#restored)
 
 ## Properties
@@ -351,6 +352,36 @@ Called when a call to "restore" failed
 #### Inherited from
 
 [BridgeCallbacks](CdvPurchase.AppleAppStore.Bridge.BridgeCallbacks.md).[restoreFailed](CdvPurchase.AppleAppStore.Bridge.BridgeCallbacks.md#restorefailed)
+
+___
+
+### restoreTransactionUpdated
+
+• **restoreTransactionUpdated**: (`transactionIdentifier`: `string`, `productId`: `string`, `jwsRepresentation`: `string`, `originalTransactionIdentifier?`: `string`, `transactionDate?`: `string`) => `void`
+
+Called for each transaction during restore with JWS token
+
+#### Type declaration
+
+▸ (`transactionIdentifier`, `productId`, `jwsRepresentation`, `originalTransactionIdentifier?`, `transactionDate?`): `void`
+
+##### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `transactionIdentifier` | `string` |
+| `productId` | `string` |
+| `jwsRepresentation` | `string` |
+| `originalTransactionIdentifier?` | `string` |
+| `transactionDate?` | `string` |
+
+##### Returns
+
+`void`
+
+#### Inherited from
+
+[BridgeCallbacks](CdvPurchase.AppleAppStore.Bridge.BridgeCallbacks.md).[restoreTransactionUpdated](CdvPurchase.AppleAppStore.Bridge.BridgeCallbacks.md#restoretransactionupdated)
 
 ___
 

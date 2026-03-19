@@ -15,13 +15,16 @@
 - [onPurchased](CdvPurchase.AppleAppStore.Bridge.Bridge.md#onpurchased)
 - [onRestored](CdvPurchase.AppleAppStore.Bridge.Bridge.md#onrestored)
 - [options](CdvPurchase.AppleAppStore.Bridge.Bridge.md#options)
+- [restoredTransactions](CdvPurchase.AppleAppStore.Bridge.Bridge.md#restoredtransactions)
 - [transactionsForProduct](CdvPurchase.AppleAppStore.Bridge.Bridge.md#transactionsforproduct)
 
 ### Methods
 
 - [canMakePayments](CdvPurchase.AppleAppStore.Bridge.Bridge.md#canmakepayments)
+- [clearRestoredTransactions](CdvPurchase.AppleAppStore.Bridge.Bridge.md#clearrestoredtransactions)
 - [finalizeTransactionUpdates](CdvPurchase.AppleAppStore.Bridge.Bridge.md#finalizetransactionupdates)
 - [finish](CdvPurchase.AppleAppStore.Bridge.Bridge.md#finish)
+- [getRestoredTransactions](CdvPurchase.AppleAppStore.Bridge.Bridge.md#getrestoredtransactions)
 - [init](CdvPurchase.AppleAppStore.Bridge.Bridge.md#init)
 - [lastTransactionUpdated](CdvPurchase.AppleAppStore.Bridge.Bridge.md#lasttransactionupdated)
 - [load](CdvPurchase.AppleAppStore.Bridge.Bridge.md#load)
@@ -36,6 +39,7 @@
 - [restore](CdvPurchase.AppleAppStore.Bridge.Bridge.md#restore)
 - [restoreCompletedTransactionsFailed](CdvPurchase.AppleAppStore.Bridge.Bridge.md#restorecompletedtransactionsfailed)
 - [restoreCompletedTransactionsFinished](CdvPurchase.AppleAppStore.Bridge.Bridge.md#restorecompletedtransactionsfinished)
+- [restoreTransactionUpdated](CdvPurchase.AppleAppStore.Bridge.Bridge.md#restoretransactionupdated)
 - [transactionUpdated](CdvPurchase.AppleAppStore.Bridge.Bridge.md#transactionupdated)
 
 ## Constructors
@@ -90,6 +94,14 @@ Callbacks set by the adapter
 
 ___
 
+### restoredTransactions
+
+• **restoredTransactions**: \{ `jwsRepresentation`: `string` ; `originalTransactionIdentifier?`: `string` ; `productId`: `string` ; `transactionDate?`: `string` ; `transactionIdentifier`: `string`  }[] = `[]`
+
+Transactions collected during restore (with JWS tokens)
+
+___
+
 ### transactionsForProduct
 
 • **transactionsForProduct**: `Object` = `{}`
@@ -114,6 +126,19 @@ Checks if device/user is allowed to make in-app purchases
 | :------ | :------ |
 | `success` | () => `void` |
 | `error` | (`message`: `string`) => `void` |
+
+#### Returns
+
+`void`
+
+___
+
+### clearRestoredTransactions
+
+▸ **clearRestoredTransactions**(): `void`
+
+Clear the collected restore transactions.
+Call this before starting a new restore.
 
 #### Returns
 
@@ -146,6 +171,18 @@ ___
 #### Returns
 
 `void`
+
+___
+
+### getRestoredTransactions
+
+▸ **getRestoredTransactions**(): \{ `jwsRepresentation`: `string` ; `originalTransactionIdentifier?`: `string` ; `productId`: `string` ; `transactionDate?`: `string` ; `transactionIdentifier`: `string`  }[]
+
+Get all collected restore transactions with JWS tokens.
+
+#### Returns
+
+\{ `jwsRepresentation`: `string` ; `originalTransactionIdentifier?`: `string` ; `productId`: `string` ; `transactionDate?`: `string` ; `transactionIdentifier`: `string`  }[]
 
 ___
 
@@ -372,6 +409,29 @@ ___
 ### restoreCompletedTransactionsFinished
 
 ▸ **restoreCompletedTransactionsFinished**(): `void`
+
+#### Returns
+
+`void`
+
+___
+
+### restoreTransactionUpdated
+
+▸ **restoreTransactionUpdated**(`transactionIdentifier`, `productId`, `jwsRepresentation`, `originalTransactionIdentifier?`, `transactionDate?`): `void`
+
+Called from native for each transaction during restore.
+Collects the JWS token for server-side verification.
+
+#### Parameters
+
+| Name | Type |
+| :------ | :------ |
+| `transactionIdentifier` | `string` |
+| `productId` | `string` |
+| `jwsRepresentation` | `string` |
+| `originalTransactionIdentifier?` | `string` |
+| `transactionDate?` | `string` |
 
 #### Returns
 

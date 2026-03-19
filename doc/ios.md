@@ -1,24 +1,78 @@
 # iOS Configuration
 
+## Requirements
+
+| Requirement | Value |
+|-------------|-------|
+| **iOS** | 15.0+ |
+| **macOS** | 12.0+ |
+| **Xcode** | 13.0+ |
+| **Swift** | 5.5+ |
+
+> This plugin uses **StoreKit 2**, Apple's modern Swift-based in-app purchase framework introduced in iOS 15. For migration details, see the [StoreKit 2 Migration Guide](storekit2-migration.md).
+
 ## Configure the App
 
-Member center: https://developer.apple.com/membercenter/index.action
+App Store Connect: https://appstoreconnect.apple.com
 
- - Create an Identifier
+ - Create an App ID (bundle identifier)
  - Create a Development Provisioning Profile
+ - Create a new app (using the App ID)
+ - Configure In-App Purchases under "Features" → "In-App Purchases"
+ - Create a Sandbox test user under "Users and Access" → "Sandbox"
 
-iTunes Connect: http://itunesconnect.apple.com
+Device Setup
 
- - Create a new app (using the Identifier)
- - Create a purchase (type consumable)
- - (Add a dummy screenshot)
- - Create a test user
+ - Settings → App Store → Sign out of production Apple ID
+ - Sign in with Sandbox Apple ID when prompted during purchase
+ - `cordova build ios`
+ - Open with Xcode and run on device
 
-Device
+## StoreKit 2 Features
 
- - Logout from iTunes from the settings
- - cordova build ios
- - open with XCode and run
+### JWS Transaction Tokens
+
+StoreKit 2 provides signed transactions in JWS (JSON Web Signature) format. Each transaction includes cryptographic proof that it came from Apple, enabling secure server-side verification.
+
+```javascript
+store.when().approved(transaction => {
+    // The transaction contains a JWS token for server verification
+    transaction.verify();
+});
+```
+
+### AppAccountToken
+
+StoreKit 2 introduces `appAccountToken`, a UUID that links purchases to your user accounts. Set this during purchase:
+
+```javascript
+const product = store.get('my_subscription');
+product?.getOffer()?.order({
+    appAccountToken: generateUUID(userId)  // Your user's ID as UUID
+});
+```
+
+The token persists with the transaction and appears in:
+- Client-side transaction data
+- Server notifications (webhooks)
+- Transaction history API calls
+
+### Server-Side Verification
+
+For your own validation server, use Apple's official library:
+
+```bash
+npm install @apple/app-store-server-library
+```
+
+```javascript
+const { SignedDataVerifier, Environment } = require('@apple/app-store-server-library');
+
+const verifier = new SignedDataVerifier([], true, Environment.SANDBOX, 'your.bundle.id');
+const transaction = await verifier.verifyAndDecodeTransaction(jwsToken);
+```
+
+See the [StoreKit 2 Migration Guide](storekit2-migration.md) for complete backend setup instructions.
 
 ### Test users and subscriptions
 

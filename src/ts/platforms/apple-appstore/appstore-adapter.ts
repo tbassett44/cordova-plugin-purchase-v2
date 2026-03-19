@@ -269,11 +269,11 @@ namespace CdvPurchase {
                             this.log.info('ready');
                         },
 
-                        purchased: async (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string) => {
-                            this.log.info('purchase: id:' + transactionIdentifier + ' product:' + productId + ' originalTransaction:' + originalTransactionIdentifier + ' - date:' + transactionDate + ' - discount:' + discountId);
+                        purchased: async (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string) => {
+                            this.log.info('purchase: id:' + transactionIdentifier + ' product:' + productId + ' originalTransaction:' + originalTransactionIdentifier + ' - date:' + transactionDate + ' - discount:' + discountId + ' - expires:' + expirationDate);
                             // we can add the transaction to the receipt here
                             const transaction = await this.upsertTransaction(productId, transactionIdentifier, TransactionState.APPROVED);
-                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId);
+                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate);
                             this.removeTransactionInProgress(productId);
                             this.receiptsUpdated.call();
                             this.callPaymentMonitor('purchased');
@@ -429,6 +429,21 @@ namespace CdvPurchase {
                 if (!nativeData?.appStoreReceipt) {
                     this.log.warn('no appStoreReceipt');
                     this._appStoreReceiptLoading = false;
+                    // StoreKit 2: If we don't need the app receipt, create an empty receipt
+                    // to allow JWS-based transactions to proceed
+                    if (!this.needAppReceipt) {
+                        this.log.info('needAppReceipt=false, creating empty receipt for StoreKit 2 JWS flow');
+                        const emptyNativeData: ApplicationReceipt = {
+                            appStoreReceipt: '',
+                            bundleIdentifier: nativeData?.bundleIdentifier || '',
+                            bundleShortVersion: nativeData?.bundleShortVersion || '',
+                            bundleNumericVersion: nativeData?.bundleNumericVersion || 0,
+                            bundleSignature: nativeData?.bundleSignature || ''
+                        };
+                        this._receipt = new SKApplicationReceipt(emptyNativeData, false, this.context.apiDecorators);
+                        callCallbacks(undefined);
+                        return;
+                    }
                     callCallbacks(appStoreError(ErrorCode.REFRESH, 'No appStoreReceipt', null));
                     return;
                 }

@@ -3015,11 +3015,11 @@ var CdvPurchase;
                         ready: () => {
                             this.log.info('ready');
                         },
-                        purchased: (transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId) => __awaiter(this, void 0, void 0, function* () {
-                            this.log.info('purchase: id:' + transactionIdentifier + ' product:' + productId + ' originalTransaction:' + originalTransactionIdentifier + ' - date:' + transactionDate + ' - discount:' + discountId);
+                        purchased: (transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate) => __awaiter(this, void 0, void 0, function* () {
+                            this.log.info('purchase: id:' + transactionIdentifier + ' product:' + productId + ' originalTransaction:' + originalTransactionIdentifier + ' - date:' + transactionDate + ' - discount:' + discountId + ' - expires:' + expirationDate);
                             // we can add the transaction to the receipt here
                             const transaction = yield this.upsertTransaction(productId, transactionIdentifier, CdvPurchase.TransactionState.APPROVED);
-                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId);
+                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate);
                             this.removeTransactionInProgress(productId);
                             this.receiptsUpdated.call();
                             this.callPaymentMonitor('purchased');
@@ -3159,6 +3159,21 @@ var CdvPurchase;
                     if (!(nativeData === null || nativeData === void 0 ? void 0 : nativeData.appStoreReceipt)) {
                         this.log.warn('no appStoreReceipt');
                         this._appStoreReceiptLoading = false;
+                        // StoreKit 2: If we don't need the app receipt, create an empty receipt
+                        // to allow JWS-based transactions to proceed
+                        if (!this.needAppReceipt) {
+                            this.log.info('needAppReceipt=false, creating empty receipt for StoreKit 2 JWS flow');
+                            const emptyNativeData = {
+                                appStoreReceipt: '',
+                                bundleIdentifier: (nativeData === null || nativeData === void 0 ? void 0 : nativeData.bundleIdentifier) || '',
+                                bundleShortVersion: (nativeData === null || nativeData === void 0 ? void 0 : nativeData.bundleShortVersion) || '',
+                                bundleNumericVersion: (nativeData === null || nativeData === void 0 ? void 0 : nativeData.bundleNumericVersion) || 0,
+                                bundleSignature: (nativeData === null || nativeData === void 0 ? void 0 : nativeData.bundleSignature) || ''
+                            };
+                            this._receipt = new AppleAppStore.SKApplicationReceipt(emptyNativeData, false, this.context.apiDecorators);
+                            callCallbacks(undefined);
+                            return;
+                        }
                         callCallbacks(appStoreError(CdvPurchase.ErrorCode.REFRESH, 'No appStoreReceipt', null));
                         return;
                     }
@@ -3369,12 +3384,12 @@ var CdvPurchase;
                     if (transaction.transactionId === AppleAppStore.APPLICATION_VIRTUAL_TRANSACTION_ID || transaction.transactionId === virtualTransactionId(transaction.products[0].id)) {
                         // this is a virtual transaction, nothing to do.
                         transaction.state = CdvPurchase.TransactionState.FINISHED;
-                        this.receiptsUpdated.call();
+                        this.context.listener.receiptsUpdated(CdvPurchase.Platform.APPLE_APPSTORE, [transaction.parentReceipt]);
                         return resolve(undefined);
                     }
                     const success = () => {
                         transaction.state = CdvPurchase.TransactionState.FINISHED;
-                        this.receiptsUpdated.call();
+                        this.context.listener.receiptsUpdated(CdvPurchase.Platform.APPLE_APPSTORE, [transaction.parentReceipt]);
                         resolve(undefined);
                     };
                     const error = (msg) => {
@@ -3556,6 +3571,8 @@ var CdvPurchase;
                     this.registeredProducts = [];
                     /** True if "restoreCompleted" or "restoreFailed" should be called when restore is done */
                     this.needRestoreNotification = false;
+                    /** Transactions collected during restore (with JWS tokens) */
+                    this.restoredTransactions = [];
                     /*
                     private eventQueue: {
                         state: TransactionState;
@@ -3594,6 +3611,7 @@ var CdvPurchase;
                         receiptsRefreshed: noop,
                         restoreFailed: noop,
                         restoreCompleted: noop,
+                        restoreTransactionUpdated: noop,
                     };
                     // if (window.localStorage && window.localStorage.sk_transactionForProduct)
                     // this.transactionsForProduct = JSON.parse(window.localStorage.sk_transactionForProduct);
@@ -3625,6 +3643,7 @@ var CdvPurchase;
                         receiptsRefreshed: options.receiptsRefreshed || noop,
                         restoreFailed: options.restoreFailed || noop,
                         restoreCompleted: options.restoreCompleted || noop,
+                        restoreTransactionUpdated: options.restoreTransactionUpdated || noop,
                     };
                     if (options.debug) {
                         exec('debug', [], noop, noop);
@@ -3705,6 +3724,7 @@ var CdvPurchase;
                  */
                 restore(callback) {
                     this.needRestoreNotification = true;
+                    this.clearRestoredTransactions(); // Clear any previous restore transactions
                     exec('restoreCompletedTransactions', [], callback, callback);
                 }
                 manageSubscriptions(callback) {
@@ -3793,7 +3813,7 @@ var CdvPurchase;
                 finalizeTransactionUpdates() {
                     for (let i = 0; i < this.pendingUpdates.length; ++i) {
                         const args = this.pendingUpdates[i];
-                        this.transactionUpdated(args.state, args.errorCode, args.errorText, args.transactionIdentifier, args.productId, args.transactionReceipt, args.originalTransactionIdentifier, args.transactionDate, args.discountId);
+                        this.transactionUpdated(args.state, args.errorCode, args.errorText, args.transactionIdentifier, args.productId, args.transactionReceipt, args.originalTransactionIdentifier, args.transactionDate, args.discountId, args.expirationDate);
                     }
                     this.pendingUpdates = [];
                 }
@@ -3804,12 +3824,12 @@ var CdvPurchase;
                 //
                 // Note that it may eventually be called before initialization... unfortunately.
                 // In this case, we'll just keep pending updates in a list for later processing.
-                transactionUpdated(state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId) {
+                transactionUpdated(state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId, expirationDate) {
                     if (!this.initialized) {
-                        this.pendingUpdates.push({ state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId });
+                        this.pendingUpdates.push({ state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId, expirationDate });
                         return;
                     }
-                    log("transaction updated:" + transactionIdentifier + " state:" + state + " product:" + productId);
+                    log("transaction updated:" + transactionIdentifier + " state:" + state + " product:" + productId + " expires:" + expirationDate);
                     if (productId && transactionIdentifier) {
                         if (this.transactionsForProduct[productId]) {
                             this.transactionsForProduct[productId].push(transactionIdentifier);
@@ -3823,7 +3843,7 @@ var CdvPurchase;
                             protectCall(this.options.purchasing, 'options.purchasing', productId);
                             return;
                         case "PaymentTransactionStatePurchased":
-                            protectCall(this.options.purchased, 'options.purchase', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId);
+                            protectCall(this.options.purchased, 'options.purchase', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate);
                             return;
                         case "PaymentTransactionStateDeferred":
                             protectCall(this.options.deferred, 'options.deferred', productId);
@@ -3851,6 +3871,37 @@ var CdvPurchase;
                         return;
                     this.needRestoreNotification = false;
                     protectCall(this.options.restoreFailed, 'options.restoreFailed', errorCode);
+                }
+                /**
+                 * Called from native for each transaction during restore.
+                 * Collects the JWS token for server-side verification.
+                 */
+                restoreTransactionUpdated(transactionIdentifier, productId, jwsRepresentation, originalTransactionIdentifier, transactionDate, expirationDate) {
+                    log("restoreTransactionUpdated: " + transactionIdentifier + " product:" + productId + " expires:" + expirationDate);
+                    // Store the transaction with JWS for later processing
+                    this.restoredTransactions.push({
+                        transactionIdentifier,
+                        productId,
+                        jwsRepresentation,
+                        originalTransactionIdentifier,
+                        transactionDate,
+                        expirationDate
+                    });
+                    // Also call the callback if set
+                    protectCall(this.options.restoreTransactionUpdated, 'options.restoreTransactionUpdated', transactionIdentifier, productId, jwsRepresentation, originalTransactionIdentifier, transactionDate, expirationDate);
+                }
+                /**
+                 * Clear the collected restore transactions.
+                 * Call this before starting a new restore.
+                 */
+                clearRestoredTransactions() {
+                    this.restoredTransactions = [];
+                }
+                /**
+                 * Get all collected restore transactions with JWS tokens.
+                 */
+                getRestoredTransactions() {
+                    return this.restoredTransactions;
                 }
                 parseReceiptArgs(args) {
                     const base64 = args[0];
@@ -4086,13 +4137,15 @@ var CdvPurchase;
         AppleAppStore.SKApplicationReceipt = SKApplicationReceipt;
         /** StoreKit transaction */
         class SKTransaction extends CdvPurchase.Transaction {
-            refresh(productId, originalTransactionIdentifier, transactionDate, discountId) {
+            refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDateMs) {
                 if (productId)
                     this.products = [{ id: productId, offerId: discountId }];
                 if (originalTransactionIdentifier)
                     this.originalTransactionId = originalTransactionIdentifier;
                 if (transactionDate)
                     this.purchaseDate = new Date(+transactionDate);
+                if (expirationDateMs)
+                    this.expirationDate = new Date(+expirationDateMs);
             }
         }
         AppleAppStore.SKTransaction = SKTransaction;
