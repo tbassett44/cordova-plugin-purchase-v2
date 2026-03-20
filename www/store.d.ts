@@ -868,6 +868,20 @@ declare namespace CdvPurchase {
         */
         getApplicationUsername(): string | undefined;
         /**
+         * Convert a user ID string into a deterministic UUID (v4-shaped).
+         *
+         * Each character is hex-encoded (2 hex digits per char), the result is
+         * zero-padded to 32 hex characters, then formatted as 8-4-4-4-12.
+         *
+         * Apple requires a valid UUID for `appAccountToken`. This lets you
+         * derive one from an arbitrary user identifier (e.g. "U1234567890")
+         * and reverse it server-side.
+         *
+         * @param userId  The application-specific user identifier.
+         * @returns A UUID string like "55313233-3435-3637-3839-300000000000"
+         */
+        static userIdToUUID(userId: string): string;
+        /**
          * URL or implementation of the receipt validation service
          *
          * @example
@@ -1196,6 +1210,37 @@ declare namespace CdvPurchase {
          * Version of the plugin currently installed.
          */
         version: string;
+        /**
+         * The detected environment: 'production' or 'sandbox'.
+         * Defaults to 'production'. Set automatically during initialize() on iOS
+         * debug builds via cordova.plugins.DeviceMeta.
+         */
+        environment: 'production' | 'sandbox';
+        /** Cached promise so getEnvironment() only runs detection once */
+        private _environmentPromise;
+        /**
+         * Apply environment-specific configuration from the platform options
+         * passed to initialize().
+         *
+         * Each PlatformWithOptions entry may include `production` and/or `sandbox`
+         * keys with `{ validator: string }`. The method picks the one matching the
+         * detected environment and sets `store.validator`.
+         *
+         * In sandbox mode, `minTimeBetweenUpdates` is also set to 0.
+         *
+         * @internal
+         */
+        private _applyEnvironmentConfig;
+        /**
+         * Detect whether the app is running in a sandbox (iOS debug) or production environment.
+         *
+         * - Android always returns 'production' (no sandbox concept at this layer).
+         * - iOS uses cordova.plugins.DeviceMeta; if the build is a debug build, returns 'sandbox'.
+         * - If DeviceMeta is unavailable, defaults to 'production' and logs a warning.
+         *
+         * The result is cached — subsequent calls return the same promise.
+         */
+        getEnvironment(): Promise<'production' | 'sandbox'>;
     }
     /**
      * The global store object.
@@ -2495,7 +2540,7 @@ declare namespace CdvPurchase {
      */
     namespace AppleAppStore {
         type PaymentMonitorStatus = 'cancelled' | 'failed' | 'purchased' | 'deferred';
-        type PaymentMonitor = (status: PaymentMonitorStatus) => void;
+        type PaymentMonitor = (status: PaymentMonitorStatus, code?: ErrorCode, message?: string, productId?: string) => void;
         /** Additional data passed with an order on AppStore */
         interface AdditionalData {
             /** Information about the payment discount */
@@ -2535,6 +2580,15 @@ declare namespace CdvPurchase {
              * The default is "true", use "false" is an optimization.
              */
             needAppReceipt?: boolean;
+            /**
+             * Enable verbose native (Swift) logging.
+             *
+             * When true, the plugin calls the native `debug` command on the Swift side,
+             * which sets `debugEnabled = true` so every `log()` call in Swift is printed
+             * to the Xcode console. Equivalent to setting `store.verbosity = DEBUG` but
+             * scoped to the native layer only.
+             */
+            debug?: boolean;
             /**
              * Auto-finish pending transaction
              *
@@ -2579,6 +2633,8 @@ declare namespace CdvPurchase {
             needAppReceipt: boolean;
             /** True to auto-finish all transactions */
             autoFinish: boolean;
+            /** True to enable verbose native Swift logging */
+            debugEnabled: boolean;
             /** Callback called when the restore process is completed */
             onRestoreCompleted?: (code: IError | undefined) => void;
             /** Debounced version of _receiptUpdated */
@@ -2741,7 +2797,7 @@ declare namespace CdvPurchase {
                 /** Called when the bridge is ready (after setup) */
                 ready: () => void;
                 /** Called when a transaction is in "Purchased" state */
-                purchased: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string) => void;
+                purchased: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string, jwsRepresentation?: string) => void;
                 /** Called when a transaction has been enqueued */
                 purchaseEnqueued: (productId: string, quantity: number) => void;
                 /**
@@ -2821,7 +2877,7 @@ declare namespace CdvPurchase {
                  * @param {String} productId The product identifier. e.g. "com.example.MyApp.myproduct"
                  * @param {int} quantity Quantity of product to purchase
                  */
-                purchase(productId: string, quantity: number, applicationUsername: string | undefined, discount: PaymentDiscount | undefined, success: () => void, error: () => void): void;
+                purchase(productId: string, quantity: number, applicationUsername: string | undefined, discount: PaymentDiscount | undefined, success: () => void, error: (message?: string) => void, canPurchase?: boolean): void;
                 /**
                  * Checks if device/user is allowed to make in-app purchases
                  */
@@ -2832,6 +2888,16 @@ declare namespace CdvPurchase {
                  * The restored transactions are passed to the onRestored callback, so make sure you define a handler for that first.
                  */
                 restore(callback?: Callback<any>): void;
+                /**
+                 * Silently fetch current active entitlements from StoreKit 2
+                 * without triggering AppStore.sync() (no sign-in dialog).
+                 *
+                 * Callback receives an array of { productId, expirationDate } objects.
+                 */
+                getCurrentEntitlements(success: (entitlements: {
+                    productId: string;
+                    expirationDate?: string;
+                }[]) => void, error: (msg: string) => void): void;
                 manageSubscriptions(callback?: Callback<any>): void;
                 manageBilling(callback?: Callback<any>): void;
                 presentCodeRedemptionSheet(callback?: Callback<any>): void;
@@ -2863,7 +2929,7 @@ declare namespace CdvPurchase {
                 finish(transactionId: string, success: () => void, error: (msg: string) => void): void;
                 finalizeTransactionUpdates(): void;
                 lastTransactionUpdated(): void;
-                transactionUpdated(state: TransactionState, errorCode: ErrorCode | undefined, errorText: string | undefined, transactionIdentifier: string, productId: string, transactionReceipt: never, originalTransactionIdentifier: string | undefined, transactionDate: string | undefined, discountId: string | undefined, expirationDate: string | undefined): void;
+                transactionUpdated(state: TransactionState, errorCode: ErrorCode | undefined, errorText: string | undefined, transactionIdentifier: string, productId: string, jwsRepresentation: string | undefined, originalTransactionIdentifier: string | undefined, transactionDate: string | undefined, discountId: string | undefined, expirationDate: string | undefined): void;
                 restoreCompletedTransactionsFinished(): void;
                 restoreCompletedTransactionsFailed(errorCode: ErrorCode): void;
                 /**
@@ -2970,7 +3036,9 @@ declare namespace CdvPurchase {
         /** StoreKit transaction */
         class SKTransaction extends Transaction {
             originalTransactionId?: string;
-            refresh(productId?: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDateMs?: string): void;
+            /** JWS representation of the transaction (StoreKit 2) */
+            jwsRepresentation?: string;
+            refresh(productId?: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDateMs?: string, jwsRepresentation?: string): void;
         }
     }
 }
@@ -5911,12 +5979,18 @@ declare namespace CdvPurchase {
                 type: 'ios-appstore';
                 /** Identifier of the transaction to evaluate, or set it to your application identifier if id has been set so. @required */
                 id?: string;
-                /** Apple appstore receipt, base64 encoded. @required */
+                /** Apple appstore receipt, base64 encoded (StoreKit 1). */
                 appStoreReceipt?: string;
+                /**
+                 * JWS signed transaction from StoreKit 2.
+                 *
+                 * When present, use App Store Server API for validation instead of the legacy verifyReceipt endpoint.
+                 */
+                signedTransaction?: string;
                 /**
                  * Apple ios 6 transaction receipt.
                  *
-                 * @deprecated Use `appStoreReceipt`
+                 * @deprecated Use `appStoreReceipt` or `signedTransaction`
                  */
                 transactionReceipt?: never;
             }

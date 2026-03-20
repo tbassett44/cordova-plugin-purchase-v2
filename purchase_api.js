@@ -4,8 +4,11 @@
  * - Google: Real-time Developer Notifications (RTDN) Pub/Sub push
  * - “validate” endpoints you call from the client after purchase
  *
+ * To RUN: node purchase_api.js --sandbox (SANDBOX) 
+ * or RUN: node purchase_api.js (PRODUCTION)
+ * 
  * tools.conf = {
-    "iap": {
+ *  "iap": { //production configuration
 		"port": 3335,
 		"apple": {
 			"file_path": "/var/www/priv/iap.apple.p8",
@@ -20,6 +23,26 @@
 				"-----END PRIVATE KEY-----"
 			],
 			"APPLE_BUNDLE_ID": "earth.actualize",
+			"APPLE_APPLE_ID": "111111111",
+			"APPLE_ENVIRONMENT": "production",
+			"APPLE_NOTIFICATION_SECRET": "<secret>"
+		}
+    },
+    "iap_sandbox": { //development configuration
+		"port": 3336,
+		"apple": {
+			"file_path": "/var/www/priv/iap.apple_sandbox.p8",
+			"APPLE_ISSUER_ID": "AAAAAA-BBBB-CCCC-DDDDD-EEEEEEE",
+			"APPLE_KEY_ID": "JAAAAAAAA",
+			"APPLE_PRIVATE_KEY": [
+				"-----BEGIN PRIVATE KEY-----",
+				"line 1",
+				"line 2",
+				"line 3",
+				"line 4",
+				"-----END PRIVATE KEY-----"
+			],
+			"APPLE_BUNDLE_ID": "earth.actualize.dev",
 			"APPLE_APPLE_ID": "111111111",
 			"APPLE_ENVIRONMENT": "sandbox",
 			"APPLE_NOTIFICATION_SECRET": "<secret>"
@@ -48,9 +71,35 @@ You will get a response like this:
     ts: "2026-03-19T03:25:15.436Z"
 }
 */
+/* TESTING YOUR APPLE CREDENTIALS
+//PROD
+https://your_api_domain.com/iap/debug/apple-auth:3335/iap/debug/apple-auth
+//SANDBOX
+https://your_api_domain.com/iap/debug/apple-auth:3336/iap/debug/apple-auth
+You will get a response like this:
+{
+    success: true,
+    message: "Apple credentials validated successfully!",
+    config: {
+        keyId: "AAAAA",
+        issuerId: "8ef698f0...",
+        bundleId: "earth.actualize",
+        environment: "sandbox",
+        privateKeyPath: "/var/www/priv/iap.apple.p8",
+        privateKeyExists: true
+    },
+    appleResponse: {
+        testNotificationToken: "aaa-aaa-aaa-aa-aaa_aaaa"
+    },
+    note: "testNotificationToken can be used with getTestNotificationStatus() to verify webhook delivery",
+    elapsedMs: 140,
+    ts: "2026-03-19T03:25:15.436Z"
+}
+*/
 var version='1.2';
-var platform = 'none'; // || actualize
-var mode='none'; // || testing
+var use_environment = process.argv.includes('--sandbox') ? 'sandbox' : 'production';
+var platform = 'actualize'; // || none
+var mode='testing'; // || none
 if(platform=='actualize'){/* ACTUALIZE ENVIRONMENT INIT (DO NOT REMOVE) */
     var tools = require('./tools.js');
     tools.init({
@@ -62,9 +111,14 @@ if(platform=='actualize'){/* ACTUALIZE ENVIRONMENT INIT (DO NOT REMOVE) */
     tools.service.start('iap.js');
     tools.getEntitlement= async function(userId) {
         return new Promise((resolve, reject) => {
-            tools.db.connect(tools.conf.dbname, 'iap_entitlement', async function(coll) {
+            var postfix='';
+            if(use_environment=='sandbox') postfix='_sandbox';
+            tools.db.connect(tools.conf.dbname, 'iap_entitlement'+postfix, async function(coll) {
                 try {
-                    const doc = await coll.findOne({ id: userId });
+                    // iap_entitlement is append-only — every validation/renewal inserts a new record.
+                    // Sort by _id descending (natural insertion order) and take the first to get
+                    // the most recent entitlement state for this user.
+                    const doc = await coll.findOne({ uid: userId }, { sort: { _id: -1 } });
                     resolve(doc);
                 } catch (err) {
                     console.error('[IAP:DB] Error getting entitlement:', err);
@@ -73,9 +127,18 @@ if(platform=='actualize'){/* ACTUALIZE ENVIRONMENT INIT (DO NOT REMOVE) */
             });
         });
     }
-    this.upsertEntitlement= async function(userId, patch) {
+    tools.upsertEntitlement= async function(userId, patch) {
         patch.uid=userId;
-        var resp=await tools.formbuilder('iap_entitlement',patch);
+        var postfix='';
+        if(use_environment=='sandbox') postfix='_sandbox';
+        var resp=await tools.formbuilder('iap_entitlement'+postfix,patch);
+        tools.log(JSON.stringify(resp));
+        return resp;
+    }
+    tools.upsertTransaction= async function(data) {
+        var postfix='';
+        if(use_environment=='sandbox') postfix='_sandbox';
+        var resp=await tools.formbuilder('iap_transaction'+postfix, data);
         tools.log(JSON.stringify(resp));
         return resp;
     }
@@ -92,6 +155,13 @@ if(platform=='actualize'){/* ACTUALIZE ENVIRONMENT INIT (DO NOT REMOVE) */
             })
         },
         upsertEntitlement: async function(userId, patch) {
+            //your DB logic for upserting entitlement
+            return new Promise((resolve, reject) => {
+                //your DB logic for getting entitlement, you will want to make an api call to separate logic
+                resolve(null);
+            })
+        },
+        upsertTransaction: async function(data) {
             //your DB logic for upserting entitlement
             return new Promise((resolve, reject) => {
                 //your DB logic for getting entitlement, you will want to make an api call to separate logic
@@ -130,6 +200,9 @@ if(platform=='actualize'){/* ACTUALIZE ENVIRONMENT INIT (DO NOT REMOVE) */
 }
 const express=tools.require('express');
 var route_start='/iap';
+if(use_environment==='sandbox'){
+    route_start='/iap_sandbox';
+}
 //load in ios creds
 //save p8 to local, accessible file
 var iosVariables=[
@@ -140,27 +213,64 @@ var iosVariables=[
     "APPLE_ENVIRONMENT",
     "APPLE_NOTIFICATION_SECRET"
 ];
-if(tools.conf.iap.apple.APPLE_PRIVATE_KEY){
+if(use_environment==='sandbox'){
+    console.log('\n\x1b[43m\x1b[30m' + '▀'.repeat(50) + '\x1b[0m');
+    console.log('\x1b[43m\x1b[30m   ⚠  SANDBOX MODE — NOT PRODUCTION              \x1b[0m');
+    console.log('\x1b[43m\x1b[30m' + '▄'.repeat(50) + '\x1b[0m\n');
+}
+switch(use_environment){
+    case 'sandbox':
+        var iap_config=tools.conf.iap_sandbox;
+    break;
+    case 'production':
+        var iap_config=tools.conf.iap;
+    break;
+    default:
+        console.log('Invalid environment: '+use_environment);
+        process.exit(0);
+    break;
+}
+if(iap_config.apple.APPLE_PRIVATE_KEY){
     var key='';
-    key=tools.conf.iap.apple.APPLE_PRIVATE_KEY.join("\n");
-    tools.fs.writeFileSync(tools.conf.iap.apple.file_path,key);
-    process.env.APPLE_PRIVATE_KEY_PATH=tools.conf.iap.apple.file_path;
+    key=iap_config.apple.APPLE_PRIVATE_KEY.join("\n");
+    tools.fs.writeFileSync(iap_config.apple.file_path,key);
+    process.env.APPLE_PRIVATE_KEY_PATH=iap_config.apple.file_path;
 }else{
     console.warn('Missing Required iOS variable: APPLE_PRIVATE_KEY');
     process.exit();
 }
 for(var i=0;i<iosVariables.length;i++){
     var variable=iosVariables[i];
-    if(!tools.conf.iap.apple[variable]){
+    if(!iap_config.apple[variable]){
         console.warn('Missing Required iOS variable: ',variable);
         process.exit();
     }else{
-        process.env[variable]=tools.conf.iap.apple[variable];
+        process.env[variable]=iap_config.apple[variable];
         tools.log('Loading iOS variable: ',variable);
     }
 }
 const app = express();
+
+// CORS — allow Cordova app (app://localhost) and standard web origins
+app.use((req, res, next) => {
+    const origin = req.headers.origin || '';
+    const allowed = [
+        'app://localhost',       // Cordova iOS / Android
+        'ionic://localhost',     // Ionic Capacitor
+        'http://localhost',
+        'https://localhost',
+    ];
+    if (!origin || allowed.some(o => origin.startsWith(o)) || /^https?:\/\/.*\.actualize\.earth$/.test(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+});
+
 app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 /**
  * Request logging middleware
@@ -428,11 +538,167 @@ var iap={
     upsertEntitlement: tools.upsertEntitlement,
 
     /**
+     * Upserts a transaction record into the append-only iap_transaction ledger
+     * @param {object} data - Transaction fields
+     * @returns {Promise<object>} - The inserted document
+     */
+    upsertTransaction: tools.upsertTransaction,
+
+    /**
+     * Fetch a single Apple transaction from Apple's API and save it to the iap_transaction ledger.
+     * Called internally after a webhook event that carries a transactionId.
+     *
+     * @param {string} transactionId - Apple transaction ID
+     * @param {string} userId - Internal user ID
+     * @returns {Promise<void>}
+     */
+    fetchAndSaveTransaction: async function(transactionId, userId, renewalInfo = null) {
+        try {
+            tools.log(`[IAP:TX:APPLE] fetchAndSaveTransaction: transactionId=${transactionId} userId=${userId}`);
+            const api = iap.getAppleApiClient();
+            const response = await api.getTransactionInfo(transactionId);
+            const { result: tx, environment: verifiedEnv } = await iap.verifyWithFallback(
+                async (verifier, payload) => verifier.verifyAndDecodeTransaction(payload),
+                response.signedTransactionInfo,
+                'transaction info'
+            );
+
+            // tx.price is the actual amount charged for this specific transaction, in milliunits.
+            // Divide by 1000 for the real amount (e.g. 9990 = $9.99).
+            // For prorated upgrades, Apple sets this to the prorated charge — not the full plan price.
+            // For downgrades, Apple does NOT create a new transaction; the plan change is applied
+            // at the next renewal. The upcoming renewal price lives in renewalInfo (passed from
+            // the webhook which has already decoded both signedTransactionInfo + signedRenewalInfo).
+            const priceMicros   = tx.price ?? null;           // actual amount charged NOW (milliunits)
+            const priceCurrency = tx.currency ?? null;
+            const amountPaid    = priceMicros !== null ? (priceMicros / 1000) : null;  // human-readable
+
+            // renewalInfo fields — only present when called from a webhook that included signedRenewalInfo
+            const renewalPrice        = renewalInfo?.renewalPrice        ?? null;  // upcoming renewal amount (milliunits)
+            const renewalPricePaid    = renewalPrice !== null ? (renewalPrice / 1000) : null;
+            const autoRenewProductId  = renewalInfo?.autoRenewProductId  ?? null;  // product switching TO (upgrade/downgrade)
+            const autoRenewStatus     = renewalInfo?.autoRenewStatus     ?? null;  // 1=will renew, 0=cancelled
+
+            tools.log(`[IAP:TX:APPLE] Decoded: productId=${tx.productId} priceMicros=${priceMicros} amountPaid=${amountPaid} currency=${priceCurrency} reason=${tx.transactionReason}`);
+            if (renewalPrice !== null) {
+                tools.log(`[IAP:TX:APPLE] Renewal info: renewalPrice=${renewalPrice} (=${renewalPricePaid} ${priceCurrency}) autoRenewProductId=${autoRenewProductId} autoRenewStatus=${autoRenewStatus}`);
+            }
+
+            await iap.upsertTransaction({
+                id: tx.transactionId,
+                uid: String(userId),
+                platform: 'apple',
+                originalTransactionId: tx.originalTransactionId,
+                productId: tx.productId,
+                // Actual charge for this transaction in milliunits (divide by 1000 for real amount).
+                // Prorated for upgrades; $0 scenarios don't produce a transaction (downgrade → see renewalPrice).
+                priceMicros,
+                currency: priceCurrency,
+                transactionReason: tx.transactionReason ?? null,
+                purchaseDate: tx.purchaseDate ? new Date(tx.purchaseDate).toISOString() : null,
+                environment: tx.environment ?? verifiedEnv ?? null,
+                source: 'webhook',
+                // Upcoming renewal context (populated on DID_CHANGE_RENEWAL_PRODUCT, etc.)
+                renewalPrice,          // what they'll pay at next renewal (milliunits); null if no plan change
+                autoRenewProductId,    // product they're switching TO; null if no change
+                autoRenewStatus,       // 1=renewing, 0=cancelled
+                raw: { tx, renewalInfo }
+            });
+            tools.log(`[IAP:TX:APPLE] ✅ Transaction saved: userId=${userId} transactionId=${tx.transactionId} amountPaid=${amountPaid} renewalPricePaid=${renewalPricePaid}`);
+        } catch (e) {
+            // Non-fatal — log the error but don't fail the webhook
+            console.error(`[IAP:TX:APPLE] fetchAndSaveTransaction error (transactionId=${transactionId}):`, e.message);
+        }
+    },
+
+    /**
      * Get IAP entitlement from database
      * @param {string} userId - User ID
      * @returns {Promise<object|null>} - The entitlement document or null
      */
     getEntitlement: tools.getEntitlement,
+
+    /**
+     * True when an Apple entitlement status should still grant ownership.
+     * @param {string|null|undefined} status
+     * @returns {boolean}
+     */
+    isAppleOwnedStatus: function(status) {
+        return ['active', 'grace', 'will_expire'].includes(status || 'active');
+    },
+
+    /**
+     * Build a plugin-compatible VerifiedPurchase object for Apple.
+     * @param {object} params
+     * @returns {object|null}
+     */
+    buildAppleVerifiedPurchase: function(params) {
+        const productId = params?.productId;
+        if (!productId) return null;
+
+        // PHP onBeforeSave divides expiresAt by 1000 before storing (PHP time = seconds).
+        // Normalize to milliseconds so Date.now() comparisons are correct.
+        const expiresAt = iap.ensureMs(params?.expiresAt);
+        const purchaseDate = iap.ensureMs(params?.purchaseDate);
+        const transactionId = params?.transactionId;
+        const ownedStatus = iap.isAppleOwnedStatus(params?.status);
+        const isExpired = !ownedStatus || (!!expiresAt && expiresAt <= Date.now());
+
+        const purchase = {
+            id: productId,
+            transactionId: transactionId || undefined,
+            isExpired
+        };
+
+        if (purchaseDate !== null && purchaseDate !== undefined) {
+            purchase.purchaseDate = purchaseDate;
+        }
+        if (expiresAt !== null && expiresAt !== undefined) {
+            purchase.expiryDate = expiresAt;
+        }
+        if (params?.isAcknowledged !== null && params?.isAcknowledged !== undefined) {
+            purchase.isAcknowledged = params.isAcknowledged;
+        }
+
+        return purchase;
+    },
+
+    /**
+     * Build a plugin-compatible Apple validator success response.
+     * @param {object} params
+     * @returns {{ok: true, data: object}}
+     */
+    buildAppleValidatorResponse: function(params) {
+        const data = {
+            id: params?.receiptId || params?.productId || 'unknown',
+            latest_receipt: true,
+            transaction: params?.transaction || { type: 'ios-appstore' },
+            collection: params?.verifiedPurchase ? [params.verifiedPurchase] : [],
+            date: new Date().toISOString(),
+            notificationType: params?.notificationType || null,
+            subtype: params?.subtype || null
+        };
+
+        if (params?.warning) {
+            data.warning = params.warning;
+        }
+
+        return { ok: true, data };
+    },
+
+    /**
+     * Normalize a timestamp to milliseconds.
+     * PHP's iap_entitlement onBeforeSave divides expiresAt by 1000 before storing,
+     * so values read from DB are in seconds. This converts them back to milliseconds
+     * for correct Date.now() comparisons and plugin compatibility.
+     * @param {number|null|undefined} ts
+     * @returns {number|null}
+     */
+    ensureMs: function(ts) {
+        if (!ts) return ts;
+        // 10-digit = seconds (up to ~year 2286), 13-digit = milliseconds
+        return ts < 1e11 ? ts * 1000 : ts;
+    },
 
     /** --------------------------
      * Google Play: Android Publisher API client
@@ -513,6 +779,7 @@ var iap={
      * If you want strict verification, also enforce bundleId / appAppleId checks.
      */
     normalizeAppleNotification:function(decoded, transactionInfo = null, renewalInfo = null) {
+        console.log('normalizeAppleNotification', transactionInfo, renewalInfo);
         // decoded: ResponseBodyV2DecodedPayload from @apple/app-store-server-library
         // transactionInfo: JWSTransactionDecodedPayload (decoded separately)
         // renewalInfo: JWSRenewalInfoDecodedPayload (decoded separately)
@@ -535,20 +802,39 @@ var iap={
         const currency = transactionInfo?.currency || null;
         const offerDiscountType = transactionInfo?.offerDiscountType || null;
 
+        // Renewal info fields — key for upgrade/downgrade (DID_CHANGE_RENEWAL_PRODUCT events)
+        // renewalPrice: price at next renewal in milliunits (may differ from current priceMicros after a plan switch)
+        // autoRenewProductId: the product ID they are switching TO (null if not changing)
+        // autoRenewStatus: 1 = will auto-renew, 0 = user has turned off auto-renew (cancellation pending)
+        const renewalPrice = renewalInfo?.renewalPrice ?? 0;
+        const autoRenewProductId = renewalInfo?.autoRenewProductId || null;
+        const autoRenewStatus = renewalInfo?.autoRenewStatus ?? null;
+
         let status = "unknown";
 
         if (["DID_RENEW", "DID_RECOVER", "SUBSCRIBED"].includes(notificationType)) status = "active";
         if (["EXPIRED", "DID_FAIL_TO_RENEW", "GRACE_PERIOD_EXPIRED"].includes(notificationType)) status = "expired";
         if (["CANCEL", "REFUND", "REVOKE"].includes(notificationType)) status = "canceled";
-        if (notificationType === "DID_CHANGE_RENEWAL_STATUS") {
+        if (notificationType === "DID_CHANGE_RENEWAL_STATUS" || notificationType === "DID_CHANGE_RENEWAL_PREF") {
             status = renewalInfo?.autoRenewStatus === 0 ? "will_expire" : "active";
         }
         if (notificationType === "DID_ENTER_GRACE_PERIOD") status = "grace";
 
+        // For immediate upgrades (DID_CHANGE_RENEWAL_PREF + UPGRADE subtype),
+        // Apple's transactionInfo still references the OLD product, but the user
+        // is already on the new tier. Use autoRenewProductId as the effective
+        // productId so the entitlement reflects the upgrade immediately.
+        let effectiveProductId = productId;
+        if (notificationType === "DID_CHANGE_RENEWAL_PREF" && subtype === "UPGRADE" && autoRenewProductId) {
+            console.log(`[normalizeAppleNotification] UPGRADE detected: switching productId from ${productId} to ${autoRenewProductId}`);
+            effectiveProductId = autoRenewProductId;
+        }
+
         return {
-            notificationType, subtype, status, productId, originalTransactionId,
+            notificationType, subtype, status, productId: effectiveProductId, originalTransactionId,
             transactionId, appAccountToken, expiresDate, purchaseDate, environment,
             priceMicros, currency, offerDiscountType,
+            renewalPrice, autoRenewProductId, autoRenewStatus,
             transactionInfo, renewalInfo
         };
     },
@@ -769,7 +1055,7 @@ var iap={
                             'transaction'
                         );
 
-                        tools.log('[IAP:APPLE:VALIDATE] JWS verification SUCCESS (env:', verifiedEnv + ')');
+                        tools.log('[IAP:APPLE:VALIDATE] JWS verification SUCCESS (env:'+ verifiedEnv + ')');
                         // Price fields (Apple milliunits - divide by 1000 for actual amount)
                         const priceMicros = tx.price || null;
                         const currency = tx.currency || null;
@@ -788,6 +1074,7 @@ var iap={
                             priceMicros, currency, offerDiscountType
                         });
 
+                        const purchaseDate = tx.purchaseDate ? new Date(tx.purchaseDate).getTime() : null;
                         const expiresAt = tx.expiresDate ? new Date(tx.expiresDate).getTime() : null;
                         let status = 'active';
                         if (tx.revocationDate) status = 'revoked';
@@ -796,36 +1083,78 @@ var iap={
                         tools.log('[IAP:APPLE:VALIDATE] Computed status:', status);
                         tools.log('[IAP:APPLE:VALIDATE] expiresAt:'+ expiresAt);
 
+                        // Preserve webhook-set renewal fields (autoRenewProductId, renewalPrice,
+                        // autoRenewStatus) so that a validate call doesn't clobber a pending
+                        // upgrade/downgrade recorded by DID_CHANGE_RENEWAL_PREF webhook.
+                        const existingEntitlement = await iap.getEntitlement(String(userId));
+                        const preservedRenewalFields = {};
+                        if (existingEntitlement) {
+                            if (existingEntitlement.autoRenewProductId) {
+                                preservedRenewalFields.autoRenewProductId = existingEntitlement.autoRenewProductId;
+                            }
+                            if (existingEntitlement.renewalPrice != null) {
+                                preservedRenewalFields.renewalPrice = existingEntitlement.renewalPrice;
+                            }
+                            if (existingEntitlement.autoRenewStatus != null) {
+                                preservedRenewalFields.autoRenewStatus = existingEntitlement.autoRenewStatus;
+                            }
+                            tools.log('[IAP:APPLE:VALIDATE] Preserving renewal fields from existing entitlement:', JSON.stringify(preservedRenewalFields));
+                        }
+
                         await iap.upsertEntitlement(String(userId), {
-                            source: "apple", productId: tx.productId, status, expiresAt,
-                            priceMicros, currency, offerDiscountType,
-                            raw: { transactionId: tx.transactionId, originalTransactionId: tx.originalTransactionId,
-                                   type: tx.type, appAccountToken: tx.appAccountToken, environment: tx.environment, verifiedEnv, verified: true,
-                                   priceMicros, currency, offerDiscountType }
+                            source: "apple",
+                            productId: tx.productId,
+                            status:status,
+                            expiresAt: expiresAt,
+                            priceMicros:priceMicros,
+                            currency:currency,
+                            offerDiscountType:offerDiscountType,
+                            ...preservedRenewalFields,
+                            raw: {
+                                source:'validate',
+                                transactionId: tx.transactionId,
+                                originalTransactionId: tx.originalTransactionId,
+                                type: tx.type,
+                                appAccountToken: tx.appAccountToken,
+                                environment: tx.environment,
+                                verifiedEnv:verifiedEnv,
+                                verified: true,
+                                priceMicros: priceMicros,
+                                currency: currency,
+                                offerDiscountType: offerDiscountType
+                            }
                         });
                         tools.log('[IAP:APPLE:VALIDATE] Entitlement saved to database for userId:', userId);
-
-                        const response = {
-                            ok: true,
-                            data: {
-                                id: tx.transactionId,
-                                latest_receipt: true,
-                                transaction: {
-                                    type: 'ios-appstore',
-                                    transactionId: tx.transactionId,
-                                    originalTransactionId: tx.originalTransactionId,
-                                    productId: tx.productId,
-                                    status,
-                                    expiresAt
-                                },
-                                collection: [{
-                                    transactionId: tx.transactionId,
-                                    productId: tx.productId,
-                                    expirationDate: expiresAt,
-                                    isExpired: status === 'expired'
-                                }]
-                            }
-                        };
+                        if(status=='expired'){
+                            tools.log('[IAP:APPLE:VALIDATE] ============= END (400) =============\n');
+                            return res.json({ ok: false, code: 400, message: "Subscription expired" });
+                        }
+                        const verifiedPurchase = iap.buildAppleVerifiedPurchase({
+                            productId: tx.productId,
+                            transactionId: tx.transactionId,
+                            purchaseDate,
+                            expiresAt,
+                            status
+                        });
+                        const response = iap.buildAppleValidatorResponse({
+                            productId: tx.productId,
+                            receiptId: tx.productId || tx.originalTransactionId || tx.transactionId,
+                            transaction: {
+                                type: 'ios-appstore',
+                                id: tx.originalTransactionId || tx.transactionId,
+                                transactionId: tx.transactionId,
+                                originalTransactionId: tx.originalTransactionId,
+                                productId: tx.productId,
+                                purchaseDate,
+                                expiresDate: expiresAt,
+                                status,
+                                environment: tx.environment,
+                                verifiedEnv
+                            },
+                            verifiedPurchase,
+                            notificationType: null,
+                            subtype: null
+                        });
                         tools.log('[IAP:APPLE:VALIDATE] Sending response:',JSON.stringify(response));
                         tools.log('[IAP:APPLE:VALIDATE] ============= END (200) =============\n');
                         return res.json(response);
@@ -847,33 +1176,67 @@ var iap={
                     tools.log('[IAP:APPLE:VALIDATE] Extracted productId from products array:',productId);
                 }
 
+                const existingEntitlement = await iap.getEntitlement(String(userId));
+                const appleEntitlement = existingEntitlement?.source === 'apple' ? existingEntitlement : null;
+                let responseProductId = appleEntitlement?.productId || productId || null;
+                let responseTransactionId = appleEntitlement?.raw?.transactionId || null;
+                let responseOriginalTransactionId = originalTransactionId || appleEntitlement?.raw?.originalTransactionId || responseTransactionId;
+                let responsePurchaseDate = appleEntitlement?.raw?.purchaseDate ? new Date(appleEntitlement.raw.purchaseDate).getTime() : null;
+                // DB stores expiresAt in seconds (PHP onBeforeSave divides by 1000); convert back to ms.
+                let responseExpiresAt = appleEntitlement?.expiresAt != null ? iap.ensureMs(appleEntitlement.expiresAt) : (expiresAtMs ?? null);
+                let responseStatus = appleEntitlement?.status || 'active';
+
+                if (appleEntitlement) {
+                    tools.log('[IAP:APPLE:VALIDATE] Using stored Apple entitlement for legacy response:', {
+                        productId: appleEntitlement.productId,
+                        status: appleEntitlement.status,
+                        expiresAt: appleEntitlement.expiresAt,
+                        transactionId: appleEntitlement.raw?.transactionId,
+                        originalTransactionId: appleEntitlement.raw?.originalTransactionId
+                    });
+                }
+
                 // For CdvPurchase compatibility, we acknowledge the receipt
-                if (productId) {
+                if (!appleEntitlement && productId) {
+                    responseStatus = responseExpiresAt && responseExpiresAt <= Date.now() ? 'expired' : 'active';
                     await iap.upsertEntitlement(String(userId), {
                         source: "apple", productId,
-                        status: "active",
-                        expiresAt: expiresAtMs ?? null,
+                        status: responseStatus,
+                        expiresAt: responseExpiresAt,
                         raw: { originalTransactionId: originalTransactionId ?? null, verified: false }
                     });
                     tools.log('[IAP:APPLE:VALIDATE] Entitlement saved to database (legacy mode) for userId:'+ userId+' productId:'+productId);
-                } else {
+                } else if (!responseProductId) {
                     tools.log('[IAP:APPLE:VALIDATE] WARNING: No productId found, entitlement not saved');
                 }
 
-                // CdvPurchase-compatible response
-                const response = {
-                    ok: true,
-                    data: {
-                        id: originalTransactionId || 'unknown',
-                        latest_receipt: true,
-                        transaction: { type: 'ios-appstore' },
-                        collection: productId ? [{
-                            transactionId: originalTransactionId,
-                            productId: productId,
-                            isAcknowledged: true
-                        }] : []
-                    }
-                };
+                const verifiedPurchase = iap.buildAppleVerifiedPurchase({
+                    productId: responseProductId,
+                    transactionId: responseTransactionId || responseOriginalTransactionId,
+                    purchaseDate: responsePurchaseDate,
+                    expiresAt: responseExpiresAt,
+                    status: responseStatus,
+                    isAcknowledged: !!responseProductId
+                });
+
+                const response = iap.buildAppleValidatorResponse({
+                    productId: responseProductId,
+                    receiptId: responseProductId || responseOriginalTransactionId || 'unknown',
+                    transaction: {
+                        type: 'ios-appstore',
+                        id: responseOriginalTransactionId || responseTransactionId || responseProductId || 'unknown',
+                        transactionId: responseTransactionId || undefined,
+                        originalTransactionId: responseOriginalTransactionId || undefined,
+                        productId: responseProductId || undefined,
+                        purchaseDate: responsePurchaseDate || undefined,
+                        expiresDate: responseExpiresAt || undefined,
+                        status: responseStatus
+                    },
+                    verifiedPurchase,
+                    warning: appleEntitlement ? 'Validated using stored Apple entitlement state.' : undefined,
+                    notificationType: null,
+                    subtype: null
+                });
                 tools.log('[IAP:APPLE:VALIDATE] Sending legacy response:', JSON.stringify(response));
                 tools.log('[IAP:APPLE:VALIDATE] ============= END (200) =============\n');
                 res.json(response);
@@ -1000,22 +1363,37 @@ var iap={
 
             await iap.upsertEntitlement(String(userId), {
                 source: "apple",
-                productId,
+                productId: norm.productId || productId,
                 status: norm.status,
                 expiresAt,
                 // Price fields (Apple milliunits - divide by 1000 for actual amount)
-                priceMicros: norm.priceMicros,
+                priceMicros: (norm.renewalPrice) ? norm.renewalPrice : norm.priceMicros,
                 currency: norm.currency,
                 offerDiscountType: norm.offerDiscountType,
+                // Renewal / plan-change fields (populated on DID_CHANGE_RENEWAL_PRODUCT, etc.)
+                renewalPrice: norm.renewalPrice,
+                autoRenewProductId: norm.autoRenewProductId,
+                autoRenewStatus: norm.autoRenewStatus,
                 raw: {
+                    source: 'webhook',
                     transactionId: norm.transactionId, originalTransactionId: norm.originalTransactionId,
                     notificationType: norm.notificationType, subtype: norm.subtype,
                     environment: norm.environment, verifiedEnv, lastUpdated: new Date().toISOString(), verified: true,
-                    priceMicros: norm.priceMicros, currency: norm.currency, offerDiscountType: norm.offerDiscountType
+                    priceMicros: norm.priceMicros, currency: norm.currency, offerDiscountType: norm.offerDiscountType,
+                    renewalPrice: norm.renewalPrice, autoRenewProductId: norm.autoRenewProductId, autoRenewStatus: norm.autoRenewStatus
                 }
             });
 
             tools.log(`[IAP:WEBHOOK:APPLE] ✅ Entitlement saved to database: userId=${userId}, status=${norm.status}, productId=${productId}`);
+
+            // Persist the individual billing event to the transaction ledger (non-fatal).
+            // Pass renewalInfo so fetchAndSaveTransaction can record the upcoming renewal price
+            // and autoRenewProductId — critical for downgrades where there is no charge NOW
+            // but the next renewal price and target product differ from the current transaction.
+            if (norm.transactionId) {
+                iap.fetchAndSaveTransaction(norm.transactionId, userId, renewalInfo);
+            }
+
             tools.log('[IAP:WEBHOOK:APPLE] ============= END (200) =============\n');
             res.json({ ok: true });
         } catch (e) {
@@ -1295,7 +1673,7 @@ var iap={
         /** --------------------------
          * Start
          * -------------------------- */
-        const port = Number(tools.conf.iap.port);
+        const port = Number(iap_config.port);
         app.listen(port, () => {
             tools.log(`IAP service listening on :${port}`);
             tools.log(`- Health check:   GET  ${route_start}/health`);

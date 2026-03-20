@@ -129,13 +129,20 @@ namespace CdvPurchase {
                 /** Identifier of the transaction to evaluate, or set it to your application identifier if id has been set so. @required */
                 id?: string;
 
-                /** Apple appstore receipt, base64 encoded. @required */
+                /** Apple appstore receipt, base64 encoded (StoreKit 1). */
                 appStoreReceipt?: string;
+
+                /**
+                 * JWS signed transaction from StoreKit 2.
+                 *
+                 * When present, use App Store Server API for validation instead of the legacy verifyReceipt endpoint.
+                 */
+                signedTransaction?: string;
 
                 /**
                  * Apple ios 6 transaction receipt.
                  *
-                 * @deprecated Use `appStoreReceipt`
+                 * @deprecated Use `appStoreReceipt` or `signedTransaction`
                  */
                 transactionReceipt?: never;
             }

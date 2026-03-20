@@ -1034,37 +1034,52 @@ var CdvPurchase;
                 const receipts = this.updatedReceiptsToProcess;
                 this.updatedReceiptsToProcess = [];
                 receipts.forEach(receipt => {
+                    this.log.debug(`[_processUpdatedReceipts] receipt platform=${receipt.platform} transactions=${receipt.transactions.length}`);
                     this.delegate.updatedReceiptCallbacks.trigger(receipt, 'adapterListener_receiptsUpdated');
                     receipt.transactions.forEach(transaction => {
                         var _a;
                         const transactionToken = StoreAdapterListener.makeTransactionToken(transaction);
                         const tokenWithState = transactionToken + '@' + transaction.state;
                         const lastState = this.lastTransactionState[transactionToken];
+                        this.log.debug(`[_processUpdatedReceipts] transaction token=${transactionToken} state=${transaction.state} lastState=${lastState} products=${JSON.stringify(transaction.products)}`);
                         // Retrigger "approved", so validation is rerun on potential update.
                         if (transaction.state === CdvPurchase.TransactionState.APPROVED) {
-                            // prevent calling approved twice in a very short period (60 seconds).
+                            // prevent calling approved twice in a very short period (10 seconds).
                             const lastCalled = (_a = this.lastCallTimeForState[tokenWithState]) !== null && _a !== void 0 ? _a : 0;
-                            if (now - lastCalled > 60000) {
+                            const elapsed = now - lastCalled;
+                            this.log.debug(`[_processUpdatedReceipts] APPROVED: lastCalled=${lastCalled} elapsed=${elapsed}ms threshold=10000ms`);
+                            if (elapsed > 10000) {
+                                this.log.debug(`[_processUpdatedReceipts] -> triggering approvedCallbacks for ${transactionToken}`);
                                 this.lastCallTimeForState[tokenWithState] = now;
                                 this.delegate.approvedCallbacks.trigger(transaction, 'adapterListener_receiptsUpdated_approved');
                             }
                             else {
-                                this.log.debug(`Skipping ${tokenWithState}, because it has been last called ${lastCalled > 0 ? Math.round(now - lastCalled) + 'ms ago (' + now + '-' + lastCalled + ')' : 'never'}`);
+                                this.log.debug(`[_processUpdatedReceipts] -> SKIPPING approved for ${tokenWithState} (called ${elapsed}ms ago)`);
                             }
                         }
                         else if (lastState !== transaction.state) {
+                            this.log.debug(`[_processUpdatedReceipts] state changed: ${lastState} -> ${transaction.state} for ${transactionToken}`);
                             if (transaction.state === CdvPurchase.TransactionState.INITIATED) {
+                                this.log.debug(`[_processUpdatedReceipts] -> triggering initiatedCallbacks for ${transactionToken}`);
                                 this.lastCallTimeForState[tokenWithState] = now;
                                 this.delegate.initiatedCallbacks.trigger(transaction, 'adapterListener_receiptsUpdated_initiated');
                             }
                             else if (transaction.state === CdvPurchase.TransactionState.FINISHED) {
+                                this.log.debug(`[_processUpdatedReceipts] -> triggering finishedCallbacks for ${transactionToken}`);
                                 this.lastCallTimeForState[tokenWithState] = now;
                                 this.delegate.finishedCallbacks.trigger(transaction, 'adapterListener_receiptsUpdated_finished');
                             }
                             else if (transaction.state === CdvPurchase.TransactionState.PENDING) {
+                                this.log.debug(`[_processUpdatedReceipts] -> triggering pendingCallbacks for ${transactionToken}`);
                                 this.lastCallTimeForState[tokenWithState] = now;
                                 this.delegate.pendingCallbacks.trigger(transaction, 'adapterListener_receiptsUpdated_pending');
                             }
+                            else {
+                                this.log.debug(`[_processUpdatedReceipts] -> unhandled state: ${transaction.state} for ${transactionToken}`);
+                            }
+                        }
+                        else {
+                            this.log.debug(`[_processUpdatedReceipts] no state change for ${transactionToken} (still ${transaction.state}), skipping`);
                         }
                         this.lastTransactionState[transactionToken] = transaction.state;
                     });
@@ -1551,6 +1566,12 @@ var CdvPurchase;
              * Version of the plugin currently installed.
              */
             this.version = CdvPurchase.PLUGIN_VERSION;
+            /**
+             * The detected environment: 'production' or 'sandbox'.
+             * Defaults to 'production'. Set automatically during initialize() on iOS
+             * debug builds via cordova.plugins.DeviceMeta.
+             */
+            this.environment = 'production';
             const store = this;
             this.listener = new CdvPurchase.Internal.StoreAdapterListener({
                 updatedCallbacks: this.updatedCallbacks,
@@ -1623,6 +1644,37 @@ var CdvPurchase;
             return this.applicationUsername;
         }
         /**
+         * Convert a user ID string into a deterministic UUID (v4-shaped).
+         *
+         * Each character is hex-encoded (2 hex digits per char), the result is
+         * zero-padded to 32 hex characters, then formatted as 8-4-4-4-12.
+         *
+         * Apple requires a valid UUID for `appAccountToken`. This lets you
+         * derive one from an arbitrary user identifier (e.g. "U1234567890")
+         * and reverse it server-side.
+         *
+         * @param userId  The application-specific user identifier.
+         * @returns A UUID string like "55313233-3435-3637-3839-300000000000"
+         */
+        static userIdToUUID(userId) {
+            if (userId.length > 16) {
+                throw new Error('userIdToUUID: userId must be 16 characters or fewer (got ' + userId.length + ')');
+            }
+            let hex = '';
+            for (let i = 0; i < userId.length; i++) {
+                const code = userId.charCodeAt(i).toString(16);
+                hex += code.length < 2 ? '0' + code : code;
+            }
+            while (hex.length < 32) {
+                hex += '0';
+            }
+            return hex.substring(0, 8) + '-' +
+                hex.substring(8, 12) + '-' +
+                hex.substring(12, 16) + '-' +
+                hex.substring(16, 20) + '-' +
+                hex.substring(20, 32);
+        }
+        /**
          * Register a product.
          *
          * @example
@@ -1674,6 +1726,11 @@ var CdvPurchase;
                 }
                 this.log.info('initialize(' + JSON.stringify(platforms) + ') v' + CdvPurchase.PLUGIN_VERSION);
                 this.initializedHasBeenCalled = true;
+                // Detect environment before proceeding
+                const env = yield this.getEnvironment();
+                this.log.info('environment: ' + env);
+                // Apply environment-specific config from platform options
+                this._applyEnvironmentConfig(env, platforms);
                 this.lastUpdate = +new Date();
                 const store = this;
                 const ret = this.adapters.initialize(platforms, {
@@ -2144,6 +2201,83 @@ var CdvPurchase;
          */
         triggerError(error) {
             this.errorCallbacks.trigger(error, 'triggerError');
+        }
+        /**
+         * Apply environment-specific configuration from the platform options
+         * passed to initialize().
+         *
+         * Each PlatformWithOptions entry may include `production` and/or `sandbox`
+         * keys with `{ validator: string }`. The method picks the one matching the
+         * detected environment and sets `store.validator`.
+         *
+         * In sandbox mode, `minTimeBetweenUpdates` is also set to 0.
+         *
+         * @internal
+         */
+        _applyEnvironmentConfig(env, platforms) {
+            for (const p of platforms) {
+                if (typeof p === 'string')
+                    continue;
+                const opts = p.options;
+                if (!opts)
+                    continue;
+                const envOpts = opts[env];
+                if (envOpts && envOpts.validator) {
+                    this.validator = envOpts.validator;
+                    this.log.info('validator set from options.' + env + '.validator: ' + this.validator);
+                }
+            }
+            if (env === 'sandbox') {
+                this.minTimeBetweenUpdates = 0;
+                this.log.info('minTimeBetweenUpdates set to 0 (sandbox)');
+            }
+        }
+        /**
+         * Detect whether the app is running in a sandbox (iOS debug) or production environment.
+         *
+         * - Android always returns 'production' (no sandbox concept at this layer).
+         * - iOS uses cordova.plugins.DeviceMeta; if the build is a debug build, returns 'sandbox'.
+         * - If DeviceMeta is unavailable, defaults to 'production' and logs a warning.
+         *
+         * The result is cached — subsequent calls return the same promise.
+         */
+        getEnvironment() {
+            return __awaiter(this, void 0, void 0, function* () {
+                if (this._environmentPromise)
+                    return this._environmentPromise;
+                this._environmentPromise = new Promise((resolve) => {
+                    var _a, _b;
+                    const cordova = window.cordova;
+                    if (!((_b = (_a = cordova === null || cordova === void 0 ? void 0 : cordova.plugins) === null || _a === void 0 ? void 0 : _a.DeviceMeta) === null || _b === void 0 ? void 0 : _b.getDeviceMeta)) {
+                        console.warn('⚠️ cordova.plugins.DeviceMeta not available — defaulting to production');
+                        this.environment = 'production';
+                        return resolve('production');
+                    }
+                    const device = window.device;
+                    if ((device === null || device === void 0 ? void 0 : device.platform) === 'Android') {
+                        console.log('Android device — no sandbox, using production');
+                        this.environment = 'production';
+                        return resolve('production');
+                    }
+                    console.log('iOS device — checking sandbox mode via DeviceMeta…');
+                    cordova.plugins.DeviceMeta.getDeviceMeta((deviceInfo) => {
+                        if (deviceInfo === null || deviceInfo === void 0 ? void 0 : deviceInfo.debug) {
+                            this.environment = 'sandbox';
+                            console.log('%c ⚠️  SANDBOX MODE  ⚠️ ', 'background:#f5a623;color:#000;font-size:16px;font-weight:bold;padding:4px 12px;border-radius:4px;');
+                            resolve('sandbox');
+                        }
+                        else {
+                            this.environment = 'production';
+                            resolve('production');
+                        }
+                    }, () => {
+                        console.warn('⚠️ DeviceMeta.getDeviceMeta failed — defaulting to production');
+                        this.environment = 'production';
+                        resolve('production');
+                    });
+                });
+                return this._environmentPromise;
+            });
         }
     }
     CdvPurchase.Store = Store;
@@ -2863,7 +2997,7 @@ var CdvPurchase;
          */
         class Adapter {
             constructor(context, options) {
-                var _a, _b;
+                var _a, _b, _c;
                 this.id = CdvPurchase.Platform.APPLE_APPSTORE;
                 this.name = 'AppStore';
                 this.ready = false;
@@ -2889,6 +3023,7 @@ var CdvPurchase;
                 this.discountEligibilityDeterminer = options.discountEligibilityDeterminer;
                 this.needAppReceipt = (_a = options.needAppReceipt) !== null && _a !== void 0 ? _a : true;
                 this.autoFinish = (_b = options.autoFinish) !== null && _b !== void 0 ? _b : false;
+                this.debugEnabled = (_c = options.debug) !== null && _c !== void 0 ? _c : false;
                 this.pseudoReceipt = new CdvPurchase.Receipt(CdvPurchase.Platform.APPLE_APPSTORE, this.context.apiDecorators);
                 this.receiptsUpdated = CdvPurchase.Utils.createDebouncer(() => {
                     this._receiptsUpdated();
@@ -2988,8 +3123,8 @@ var CdvPurchase;
             setPaymentMonitor(fn) {
                 this._paymentMonitor = fn;
             }
-            callPaymentMonitor(status, code, message) {
-                this._paymentMonitor(status);
+            callPaymentMonitor(status, code, message, productId) {
+                this._paymentMonitor(status, code, message, productId);
             }
             initialize() {
                 return new Promise(resolve => {
@@ -2997,7 +3132,7 @@ var CdvPurchase;
                     const bridgeLogger = this.log.child('Bridge');
                     this.bridge.init({
                         autoFinish: this.autoFinish,
-                        debug: this.context.verbosity === CdvPurchase.LogLevel.DEBUG,
+                        debug: this.debugEnabled || this.context.verbosity === CdvPurchase.LogLevel.DEBUG,
                         log: msg => bridgeLogger.debug(msg),
                         error: (code, message, options) => {
                             this.log.error('ERROR: ' + code + ' - ' + message);
@@ -3015,14 +3150,14 @@ var CdvPurchase;
                         ready: () => {
                             this.log.info('ready');
                         },
-                        purchased: (transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate) => __awaiter(this, void 0, void 0, function* () {
+                        purchased: (transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation) => __awaiter(this, void 0, void 0, function* () {
                             this.log.info('purchase: id:' + transactionIdentifier + ' product:' + productId + ' originalTransaction:' + originalTransactionIdentifier + ' - date:' + transactionDate + ' - discount:' + discountId + ' - expires:' + expirationDate);
                             // we can add the transaction to the receipt here
                             const transaction = yield this.upsertTransaction(productId, transactionIdentifier, CdvPurchase.TransactionState.APPROVED);
-                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate);
+                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation);
                             this.removeTransactionInProgress(productId);
                             this.receiptsUpdated.call();
-                            this.callPaymentMonitor('purchased');
+                            this.callPaymentMonitor('purchased', undefined, undefined, productId);
                         }),
                         purchaseEnqueued: (productId, quantity) => __awaiter(this, void 0, void 0, function* () {
                             this.log.info('purchaseEnqueued: ' + productId + ' - ' + quantity);
@@ -3342,8 +3477,8 @@ var CdvPurchase;
                         if (discountId && ((discount === null || discount === void 0 ? void 0 : discount.id) !== discountId)) {
                             return callResolve(appStoreError(CdvPurchase.ErrorCode.INVALID_OFFER_IDENTIFIER, 'Offer identifier does not match additionalData.appStore.discount.id', offer.productId));
                         }
-                        this.setPaymentMonitor((status, code, message) => {
-                            this.log.info('order.paymentMonitor => ' + status + ' ' + (code !== null && code !== void 0 ? code : '') + ' ' + (message !== null && message !== void 0 ? message : ''));
+                        this.setPaymentMonitor((status, code, message, productId) => {
+                            this.log.info('order.paymentMonitor => ' + status + ' ' + (code !== null && code !== void 0 ? code : '') + ' ' + (message !== null && message !== void 0 ? message : '') + (productId ? ' product:' + productId : ''));
                             if (resolved)
                                 return;
                             switch (status) {
@@ -3358,23 +3493,38 @@ var CdvPurchase;
                                     }, 500);
                                     break;
                                 case 'purchased':
+                                    // Only resolve if this is the product we ordered, or if productId is
+                                    // unknown. Ignore background auto-renewals of other products in the
+                                    // same subscription group that fire concurrently during an upgrade.
+                                    if (!productId || productId === offer.productId) {
+                                        callResolve(undefined);
+                                    }
+                                    else {
+                                        this.log.info('order.paymentMonitor: ignoring purchased event for ' + productId + ' (waiting for ' + offer.productId + ')');
+                                    }
+                                    break;
                                 case 'deferred':
                                     callResolve(undefined);
                                     break;
                             }
                         });
-                        const success = () => {
+                        const success = () => __awaiter(this, void 0, void 0, function* () {
                             this.log.info('order.success');
+                            // Native layer accepted the purchase — create an INITIATED virtual transaction
+                            // immediately so store.when().initiated() fires right now, before purchaseEnqueued
+                            // round-trips back from the native side.
+                            yield this.upsertTransactionInProgress(offer.productId, CdvPurchase.TransactionState.INITIATED);
+                            this.context.listener.receiptsUpdated(CdvPurchase.Platform.APPLE_APPSTORE, [this.pseudoReceipt]);
                             // We'll monitor the payment before resolving.
-                        };
-                        const error = () => {
-                            this.log.info('order.error');
-                            callResolve(appStoreError(CdvPurchase.ErrorCode.PURCHASE, 'Failed to place order', offer.productId));
+                        });
+                        const error = (message) => {
+                            this.log.info('order.error' + (message ? ': ' + message : ''));
+                            callResolve(appStoreError(CdvPurchase.ErrorCode.PURCHASE, message !== null && message !== void 0 ? message : 'Failed to place order', offer.productId));
                         };
                         // When we switch AppStore user, the cached receipt isn't from the new user.
                         // so after a purchase, we want to make sure we're using the receipt from the logged in user.
                         this.forceReceiptReload = true;
-                        this.bridge.purchase(offer.productId, 1, this.context.getApplicationUsername(), discount, success, error);
+                        this.bridge.purchase(offer.productId, 1, this.context.getApplicationUsername(), discount, success, error, offer.canPurchase);
                     });
                 });
             }
@@ -3425,6 +3575,24 @@ var CdvPurchase;
                         return; // do not validate the pseudo receipt
                     const skReceipt = receipt;
                     let applicationReceipt = skReceipt.nativeData;
+                    // Get the latest transaction (which may have a JWS token from StoreKit 2)
+                    const transaction = skReceipt.transactions.slice(-1)[0];
+                    // StoreKit 2: If we have a JWS token, use it directly (no need for legacy appStoreReceipt)
+                    if (transaction === null || transaction === void 0 ? void 0 : transaction.jwsRepresentation) {
+                        this.log.info('Using StoreKit 2 JWS token for validation');
+                        return {
+                            id: applicationReceipt.bundleIdentifier,
+                            type: CdvPurchase.ProductType.APPLICATION,
+                            products: CdvPurchase.Utils.objectValues(this.validProducts).map(vp => new AppleAppStore.SKProduct(vp, vp, this.context.apiDecorators, { isEligible: () => true })),
+                            transaction: {
+                                type: 'ios-appstore',
+                                id: transaction.transactionId,
+                                // Send JWS token for StoreKit 2 validation
+                                signedTransaction: transaction.jwsRepresentation,
+                            }
+                        };
+                    }
+                    // StoreKit 1 fallback: Try to load the legacy appStoreReceipt
                     if (this.forceReceiptReload) {
                         const nativeData = yield this.loadAppStoreReceipt();
                         this.forceReceiptReload = false;
@@ -3445,7 +3613,6 @@ var CdvPurchase;
                         this.log.info('Receipt refreshed.');
                         applicationReceipt = result;
                     }
-                    const transaction = skReceipt.transactions.slice(-1)[0];
                     return {
                         id: applicationReceipt.bundleIdentifier,
                         type: CdvPurchase.ProductType.APPLICATION,
@@ -3680,7 +3847,7 @@ var CdvPurchase;
                  * @param {String} productId The product identifier. e.g. "com.example.MyApp.myproduct"
                  * @param {int} quantity Quantity of product to purchase
                  */
-                purchase(productId, quantity, applicationUsername, discount, success, error) {
+                purchase(productId, quantity, applicationUsername, discount, success, error, canPurchase = true) {
                     quantity = (quantity | 0) || 1;
                     const options = this.options;
                     // Many people forget to load information about their products from apple's servers before allowing
@@ -3701,15 +3868,15 @@ var CdvPurchase;
                         }
                         protectCall(success, 'purchase.success');
                     };
-                    const purchaseFailed = () => {
-                        const errMsg = 'Purchase failed: ' + productId;
+                    const purchaseFailed = (nativeMessage) => {
+                        const errMsg = nativeMessage || ('Purchase failed: ' + productId);
                         log(errMsg);
                         if (typeof options.error === 'function') {
                             protectCall(options.error, 'options.error', CdvPurchase.ErrorCode.PURCHASE, errMsg, { productId, quantity });
                         }
-                        protectCall(error, 'purchase.error');
+                        protectCall(error, 'purchase.error', errMsg);
                     };
-                    exec('purchase', [productId, quantity, applicationUsername, discount || {}], purchaseOk, purchaseFailed);
+                    exec('purchase', [productId, quantity, applicationUsername, discount || {}, canPurchase], purchaseOk, purchaseFailed);
                 }
                 /**
                  * Checks if device/user is allowed to make in-app purchases
@@ -3726,6 +3893,15 @@ var CdvPurchase;
                     this.needRestoreNotification = true;
                     this.clearRestoredTransactions(); // Clear any previous restore transactions
                     exec('restoreCompletedTransactions', [], callback, callback);
+                }
+                /**
+                 * Silently fetch current active entitlements from StoreKit 2
+                 * without triggering AppStore.sync() (no sign-in dialog).
+                 *
+                 * Callback receives an array of { productId, expirationDate } objects.
+                 */
+                getCurrentEntitlements(success, error) {
+                    exec('getCurrentEntitlements', [], success, error);
                 }
                 manageSubscriptions(callback) {
                     exec('manageSubscriptions', [], callback, callback);
@@ -3813,7 +3989,7 @@ var CdvPurchase;
                 finalizeTransactionUpdates() {
                     for (let i = 0; i < this.pendingUpdates.length; ++i) {
                         const args = this.pendingUpdates[i];
-                        this.transactionUpdated(args.state, args.errorCode, args.errorText, args.transactionIdentifier, args.productId, args.transactionReceipt, args.originalTransactionIdentifier, args.transactionDate, args.discountId, args.expirationDate);
+                        this.transactionUpdated(args.state, args.errorCode, args.errorText, args.transactionIdentifier, args.productId, args.jwsRepresentation, args.originalTransactionIdentifier, args.transactionDate, args.discountId, args.expirationDate);
                     }
                     this.pendingUpdates = [];
                 }
@@ -3824,9 +4000,10 @@ var CdvPurchase;
                 //
                 // Note that it may eventually be called before initialization... unfortunately.
                 // In this case, we'll just keep pending updates in a list for later processing.
-                transactionUpdated(state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId, expirationDate) {
+                // Position 5 is the JWS representation for StoreKit 2 (was transactionReceipt for StoreKit 1)
+                transactionUpdated(state, errorCode, errorText, transactionIdentifier, productId, jwsRepresentation, originalTransactionIdentifier, transactionDate, discountId, expirationDate) {
                     if (!this.initialized) {
-                        this.pendingUpdates.push({ state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId, expirationDate });
+                        this.pendingUpdates.push({ state, errorCode, errorText, transactionIdentifier, productId, jwsRepresentation, originalTransactionIdentifier, transactionDate, discountId, expirationDate });
                         return;
                     }
                     log("transaction updated:" + transactionIdentifier + " state:" + state + " product:" + productId + " expires:" + expirationDate);
@@ -3843,7 +4020,7 @@ var CdvPurchase;
                             protectCall(this.options.purchasing, 'options.purchasing', productId);
                             return;
                         case "PaymentTransactionStatePurchased":
-                            protectCall(this.options.purchased, 'options.purchase', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate);
+                            protectCall(this.options.purchased, 'options.purchase', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation);
                             return;
                         case "PaymentTransactionStateDeferred":
                             protectCall(this.options.deferred, 'options.deferred', productId);
@@ -4137,7 +4314,7 @@ var CdvPurchase;
         AppleAppStore.SKApplicationReceipt = SKApplicationReceipt;
         /** StoreKit transaction */
         class SKTransaction extends CdvPurchase.Transaction {
-            refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDateMs) {
+            refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDateMs, jwsRepresentation) {
                 if (productId)
                     this.products = [{ id: productId, offerId: discountId }];
                 if (originalTransactionIdentifier)
@@ -4146,6 +4323,8 @@ var CdvPurchase;
                     this.purchaseDate = new Date(+transactionDate);
                 if (expirationDateMs)
                     this.expirationDate = new Date(+expirationDateMs);
+                if (jwsRepresentation)
+                    this.jwsRepresentation = jwsRepresentation;
             }
         }
         AppleAppStore.SKTransaction = SKTransaction;

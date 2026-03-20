@@ -248,6 +248,7 @@ class SubscriptionService {
       platform: CdvPurchase.Platform.APPLE_APPSTORE,
       options: {
         needAppReceipt: true,
+        // debug: true, // uncomment to enable verbose native Swift logging
       }
     }]);
   }
@@ -283,6 +284,159 @@ For a more complete example with a backend integration, check:
 - Client: https://github.com/j3k0/cordova-subscription-example
 - Server: https://github.com/iaptic/iaptic-example-nodejs-backend
 
+## Apple AppStore Initialization Options
+
+When initializing the Apple AppStore platform you can pass an `options` object to tune behaviour.
+The `options` block also supports **environment-specific configuration** via nested `production` and `sandbox` keys — the plugin automatically detects the environment and applies the matching settings.
+
+```js
+store.initialize([{
+  platform: CdvPurchase.Platform.APPLE_APPSTORE,
+  options: {
+    needAppReceipt: false, // default: true — set false for StoreKit 2
+    autoFinish: false,     // default: false
+    debug: true,           // default: false
+
+    // Environment-specific options (auto-selected on init)
+    production: {
+      validator: 'https://your-server.com/iap/validate/apple'
+    },
+    sandbox: {
+      validator: 'https://your-server.com/iap_sandbox/validate/apple'
+    }
+  }
+}]);
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `needAppReceipt` | `boolean` | `true` | Set to `false` to skip loading the legacy App Store receipt. Recommended when using StoreKit 2 JWS-only validation, which avoids an unnecessary disk read at startup. |
+| `autoFinish` | `boolean` | `false` | Automatically finish all transactions as soon as they are approved. Use only in development when you want to clear a backlogged transaction queue. |
+| `debug` | `boolean` | `false` | Enable verbose native Swift logging. When `true`, every internal `log()` call in the Swift plugin layer is printed to the Xcode console. Useful during development to trace subscription status checks, StoreKit 2 entitlement lookups, and upgrade/downgrade detection without changing `store.verbosity` globally. |
+| `production` | `object` | — | Object with `{ validator: string }`. Used when the app is running in a production environment. |
+| `sandbox` | `object` | — | Object with `{ validator: string }`. Used when the app is running in a sandbox (debug) environment. |
+
+> **Tip:** `debug: true` is equivalent to setting `store.verbosity = CdvPurchase.LogLevel.DEBUG` but scoped only to the native layer — JS-level log volume stays unchanged.
+
+### Sandbox / Production Environment Detection
+
+During `initialize()`, the plugin automatically detects whether the app is running in **sandbox** or **production** mode:
+
+- **iOS:** Uses `cordova-plugin-device-meta` to check if the build is a debug build → `sandbox`. Release builds → `production`.
+- **Android:** Always returns `production` (Google Play handles sandbox internally).
+- **Fallback:** If the DeviceMeta plugin is not installed, defaults to `production` with a console warning.
+
+When **sandbox** is detected:
+- `store.validator` is set from `options.sandbox.validator` (if provided)
+- `store.minTimeBetweenUpdates` is automatically set to `0` (instant refresh for testing)
+- A yellow warning banner is logged to the console
+
+The detected environment is cached and available via:
+
+```js
+const env = await CdvPurchase.store.getEnvironment(); // 'production' | 'sandbox'
+// Also available synchronously after init:
+console.log(CdvPurchase.store.environment); // 'production' | 'sandbox'
+```
+
+> **Prerequisite:** Install `cordova-plugin-device-meta` for automatic sandbox detection on iOS.
+
+## Warm-Up Pattern (Silent Initialization)
+
+For the best user experience, initialize the store **at app launch** rather than waiting for the subscription page. This "warm-up" loads product metadata and checks entitlements silently — **no Apple ID login prompt** is triggered.
+
+```javascript
+// In your app startup (e.g. app.js or phone.init)
+phone.iap = {
+  status: 'loading',
+  entitlement: null,
+
+  getOptions: function() {
+    return {
+      needAppReceipt: false,  // Critical: prevents legacy receipt refresh prompt
+      debug: true,
+      production: { validator: apiUrl + '/iap/validate/apple' },
+      sandbox:    { validator: apiUrl + '/iap_sandbox/validate/apple' }
+    };
+  },
+
+  init: function() {
+    if (!window.CdvPurchase) { phone.iap.status = 'unavailable'; return; }
+    var platform = CdvPurchase.Platform.APPLE_APPSTORE;
+
+    CdvPurchase.store.initialize([{
+      platform: platform,
+      options: phone.iap.getOptions()
+    }]).then(function() {
+      phone.iap.status = 'ready';
+      // Silently check entitlements — no network, no login prompt
+      var adapter = CdvPurchase.store.getAdapter(platform);
+      if (adapter && adapter.bridge && adapter.bridge.getCurrentEntitlements) {
+        adapter.bridge.getCurrentEntitlements(function(entitlements) {
+          // Find active (non-expired) entitlement
+          var now = Date.now(), active = null;
+          for (var i = 0; i < entitlements.length; i++) {
+            var expMs = entitlements[i].expirationDate
+                      ? parseFloat(entitlements[i].expirationDate) : 0;
+            if (!expMs || expMs > now) { active = entitlements[i]; break; }
+          }
+          phone.iap.entitlement = active || false;
+        }, function() { phone.iap.entitlement = false; });
+      }
+    });
+  }
+};
+```
+
+**Why this is safe at app launch:**
+- `initialize()` only sets up the StoreKit observer, checks `canMakePayments`, and reads local state
+- `needAppReceipt: false` prevents the legacy `SKReceiptRefreshRequest` that can trigger a login prompt
+- `getCurrentEntitlements` reads from `Transaction.currentEntitlements` — local only, no network
+
+When the user later navigates to the subscription page, you can skip re-initialization:
+
+```javascript
+if (phone.iap.status === 'ready') {
+  // Store already initialized — just refresh products
+  CdvPurchase.store.update();
+} else {
+  // Cold init (warm-up not yet done)
+  CdvPurchase.store.initialize([{ platform: p, options: phone.iap.getOptions() }]);
+}
+```
+
+## Utility: `Store.userIdToUUID()`
+
+Apple requires `applicationUsername` (mapped to `appAccountToken` in StoreKit 2) to be a valid UUID. This static utility converts any short user ID string into a **deterministic, reversible UUID**:
+
+```javascript
+// Convert your app's user ID to a UUID for Apple
+var uuid = CdvPurchase.Store.userIdToUUID('U1234567890');
+// => "55313233-3435-3637-3839-300000000000"
+
+// Set it before initializing or purchasing
+CdvPurchase.store.applicationUsername = uuid;
+```
+
+**How it works:**
+- Each character is encoded as 2 hex digits (ASCII code)
+- The result is zero-padded to 32 hex characters
+- Formatted as a UUID: `8-4-4-4-12`
+
+**Constraints:**
+- Maximum input length: **16 characters** (each char = 2 hex digits, UUID has 32 hex digits max)
+- Throws an error if the input exceeds 16 characters
+
+**Server-side reversal** — `purchase_api.js` includes a matching `uuidToUserId()` function that reverses the encoding:
+
+```javascript
+// Server-side (in purchase_api.js)
+iap.uuidToUserId('55313233-3435-3637-3839-300000000000');
+// => "U1234567890"
+```
+
+This is used automatically by the webhook handler to extract `userId` from `appAccountToken` in Apple notifications.
+
 ## Server-Side IAP Service (purchase_api.js)
 
 This plugin includes a standalone **Node.js/Express IAP service** (`purchase_api.js`) that handles server-side receipt validation, webhooks, and entitlement management for both Apple App Store and Google Play.
@@ -305,7 +459,7 @@ npm install express googleapis @apple/app-store-server-library node-fetch
 
 ### Configuration
 
-Add an `iap` section to your config file:
+Add `iap` (production) and `iap_sandbox` sections to your config file:
 
 ```json
 {
@@ -321,6 +475,22 @@ Add an `iap` section to your config file:
         "-----END PRIVATE KEY-----"
       ],
       "APPLE_BUNDLE_ID": "com.your.app",
+      "APPLE_APPLE_ID": "123456789",
+      "APPLE_ENVIRONMENT": "production"
+    }
+  },
+  "iap_sandbox": {
+    "port": 3336,
+    "apple": {
+      "file_path": "/var/www/priv/iap.apple_sandbox.p8",
+      "APPLE_ISSUER_ID": "your-issuer-id",
+      "APPLE_KEY_ID": "your-sandbox-key-id",
+      "APPLE_PRIVATE_KEY": [
+        "-----BEGIN PRIVATE KEY-----",
+        "...your sandbox private key lines...",
+        "-----END PRIVATE KEY-----"
+      ],
+      "APPLE_BUNDLE_ID": "com.your.app.dev",
       "APPLE_APPLE_ID": "123456789",
       "APPLE_ENVIRONMENT": "sandbox"
     }
@@ -374,13 +544,30 @@ const response = await fetch('https://your-server.com/iap/restore/apple', {
 
 ### Running the Service
 
+The service supports a `--sandbox` flag to switch between production and sandbox environments:
+
 ```bash
-# Direct
+# Production (default)
 node purchase_api.js
 
-# With PM2
-pm2 start purchase_api.js --name iap --time
+# Sandbox — uses iap_sandbox config, separate DB collections, different route prefix
+node purchase_api.js --sandbox
+
+# With PM2 (run both side by side)
+pm2 start purchase_api.js --name iap-prod --time
+pm2 start purchase_api.js --name iap-sandbox --time -- --sandbox
 ```
+
+**What `--sandbox` changes:**
+| Aspect | Production | Sandbox |
+|--------|-----------|---------|
+| Config key | `tools.conf.iap` | `tools.conf.iap_sandbox` |
+| Route prefix | `/iap/...` | `/iap_sandbox/...` |
+| DB collections | `iap_entitlement`, `iap_transaction` | `iap_entitlement_sandbox`, `iap_transaction_sandbox` |
+| Apple environment | `Environment.PRODUCTION` | `Environment.SANDBOX` |
+| Startup banner | (none) | Yellow ⚠ SANDBOX MODE warning |
+
+Your config file should have both `iap` (production) and `iap_sandbox` (sandbox) blocks with their respective Apple credentials, ports, and bundle IDs.
 
 ### Apple Webhook Setup
 

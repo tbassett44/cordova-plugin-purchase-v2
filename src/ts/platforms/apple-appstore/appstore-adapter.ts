@@ -12,7 +12,7 @@ namespace CdvPurchase {
     export namespace AppleAppStore {
 
         export type PaymentMonitorStatus = 'cancelled' | 'failed' | 'purchased' | 'deferred';
-        export type PaymentMonitor = (status: PaymentMonitorStatus) => void;
+        export type PaymentMonitor = (status: PaymentMonitorStatus, code?: ErrorCode, message?: string, productId?: string) => void;
 
         /** Additional data passed with an order on AppStore */
         export interface AdditionalData {
@@ -57,6 +57,16 @@ namespace CdvPurchase {
              * The default is "true", use "false" is an optimization.
              */
             needAppReceipt?: boolean;
+
+            /**
+             * Enable verbose native (Swift) logging.
+             *
+             * When true, the plugin calls the native `debug` command on the Swift side,
+             * which sets `debugEnabled = true` so every `log()` call in Swift is printed
+             * to the Xcode console. Equivalent to setting `store.verbosity = DEBUG` but
+             * scoped to the native layer only.
+             */
+            debug?: boolean;
 
             /**
              * Auto-finish pending transaction
@@ -138,6 +148,9 @@ namespace CdvPurchase {
             /** True to auto-finish all transactions */
             autoFinish: boolean;
 
+            /** True to enable verbose native Swift logging */
+            debugEnabled: boolean;
+
             /** Callback called when the restore process is completed */
             onRestoreCompleted?: (code: IError | undefined) => void;
 
@@ -151,6 +164,7 @@ namespace CdvPurchase {
                 this.discountEligibilityDeterminer = options.discountEligibilityDeterminer;
                 this.needAppReceipt = options.needAppReceipt ?? true;
                 this.autoFinish = options.autoFinish ?? false;
+                this.debugEnabled = options.debug ?? false;
                 this.pseudoReceipt = new Receipt(Platform.APPLE_APPSTORE, this.context.apiDecorators);
                 this.receiptsUpdated = Utils.createDebouncer(() => {
                     this._receiptsUpdated();
@@ -238,8 +252,8 @@ namespace CdvPurchase {
             private setPaymentMonitor(fn: PaymentMonitor) {
                 this._paymentMonitor = fn;
             }
-            private callPaymentMonitor(status: PaymentMonitorStatus, code?: ErrorCode, message?: string) {
-                this._paymentMonitor(status);
+            private callPaymentMonitor(status: PaymentMonitorStatus, code?: ErrorCode, message?: string, productId?: string) {
+                this._paymentMonitor(status, code, message, productId);
             }
 
             initialize(): Promise<IError | undefined> {
@@ -248,7 +262,7 @@ namespace CdvPurchase {
                     const bridgeLogger = this.log.child('Bridge');
                     this.bridge.init({
                         autoFinish: this.autoFinish,
-                        debug: this.context.verbosity === LogLevel.DEBUG,
+                        debug: this.debugEnabled || this.context.verbosity === LogLevel.DEBUG,
                         log: msg => bridgeLogger.debug(msg),
 
                         error: (code: ErrorCode, message: string, options?: { productId: string, quantity?: number }) => {
@@ -269,14 +283,14 @@ namespace CdvPurchase {
                             this.log.info('ready');
                         },
 
-                        purchased: async (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string) => {
+                        purchased: async (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string, jwsRepresentation?: string) => {
                             this.log.info('purchase: id:' + transactionIdentifier + ' product:' + productId + ' originalTransaction:' + originalTransactionIdentifier + ' - date:' + transactionDate + ' - discount:' + discountId + ' - expires:' + expirationDate);
                             // we can add the transaction to the receipt here
                             const transaction = await this.upsertTransaction(productId, transactionIdentifier, TransactionState.APPROVED);
-                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate);
+                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation);
                             this.removeTransactionInProgress(productId);
                             this.receiptsUpdated.call();
-                            this.callPaymentMonitor('purchased');
+                            this.callPaymentMonitor('purchased', undefined, undefined, productId);
                         },
 
                         purchaseEnqueued: async (productId: string, quantity: number) => {
@@ -609,8 +623,8 @@ namespace CdvPurchase {
                     if (discountId && (discount?.id !== discountId)) {
                         return callResolve(appStoreError(ErrorCode.INVALID_OFFER_IDENTIFIER, 'Offer identifier does not match additionalData.appStore.discount.id', offer.productId));
                     }
-                    this.setPaymentMonitor((status: PaymentMonitorStatus, code?: ErrorCode, message?: string) => {
-                        this.log.info('order.paymentMonitor => ' + status + ' ' + (code ?? '') + ' ' + (message ?? ''));
+                    this.setPaymentMonitor((status: PaymentMonitorStatus, code?: ErrorCode, message?: string, productId?: string) => {
+                        this.log.info('order.paymentMonitor => ' + status + ' ' + (code ?? '') + ' ' + (message ?? '') + (productId ? ' product:' + productId : ''));
                         if (resolved) return;
                         switch (status) {
                             case 'cancelled':
@@ -624,23 +638,37 @@ namespace CdvPurchase {
                                 }, 500);
                                 break;
                             case 'purchased':
+                                // Only resolve if this is the product we ordered, or if productId is
+                                // unknown. Ignore background auto-renewals of other products in the
+                                // same subscription group that fire concurrently during an upgrade.
+                                if (!productId || productId === offer.productId) {
+                                    callResolve(undefined);
+                                } else {
+                                    this.log.info('order.paymentMonitor: ignoring purchased event for ' + productId + ' (waiting for ' + offer.productId + ')');
+                                }
+                                break;
                             case 'deferred':
                                 callResolve(undefined);
                                 break;
                         }
                     });
-                    const success = () => {
+                    const success = async () => {
                         this.log.info('order.success');
+                        // Native layer accepted the purchase — create an INITIATED virtual transaction
+                        // immediately so store.when().initiated() fires right now, before purchaseEnqueued
+                        // round-trips back from the native side.
+                        await this.upsertTransactionInProgress(offer.productId, TransactionState.INITIATED);
+                        this.context.listener.receiptsUpdated(Platform.APPLE_APPSTORE, [this.pseudoReceipt]);
                         // We'll monitor the payment before resolving.
                     }
-                    const error = () => {
-                        this.log.info('order.error');
-                        callResolve(appStoreError(ErrorCode.PURCHASE, 'Failed to place order', offer.productId));
+                    const error = (message?: string) => {
+                        this.log.info('order.error' + (message ? ': ' + message : ''));
+                        callResolve(appStoreError(ErrorCode.PURCHASE, message ?? 'Failed to place order', offer.productId));
                     }
                     // When we switch AppStore user, the cached receipt isn't from the new user.
                     // so after a purchase, we want to make sure we're using the receipt from the logged in user.
                     this.forceReceiptReload = true;
-                    this.bridge.purchase(offer.productId, 1, this.context.getApplicationUsername(), discount, success, error);
+                    this.bridge.purchase(offer.productId, 1, this.context.getApplicationUsername(), discount, success, error, offer.canPurchase);
                 });
             }
 
@@ -690,6 +718,27 @@ namespace CdvPurchase {
                 if (receipt !== this._receipt) return; // do not validate the pseudo receipt
                 const skReceipt = receipt as SKApplicationReceipt;
                 let applicationReceipt = skReceipt.nativeData;
+
+                // Get the latest transaction (which may have a JWS token from StoreKit 2)
+                const transaction = skReceipt.transactions.slice(-1)[0] as (SKTransaction | undefined);
+
+                // StoreKit 2: If we have a JWS token, use it directly (no need for legacy appStoreReceipt)
+                if (transaction?.jwsRepresentation) {
+                    this.log.info('Using StoreKit 2 JWS token for validation');
+                    return {
+                        id: applicationReceipt.bundleIdentifier,
+                        type: ProductType.APPLICATION,
+                        products: Utils.objectValues(this.validProducts).map(vp => new SKProduct(vp, vp, this.context.apiDecorators, { isEligible: () => true })),
+                        transaction: {
+                            type: 'ios-appstore',
+                            id: transaction.transactionId,
+                            // Send JWS token for StoreKit 2 validation
+                            signedTransaction: transaction.jwsRepresentation,
+                        }
+                    }
+                }
+
+                // StoreKit 1 fallback: Try to load the legacy appStoreReceipt
                 if (this.forceReceiptReload) {
                     const nativeData = await this.loadAppStoreReceipt();
                     this.forceReceiptReload = false;
@@ -709,7 +758,6 @@ namespace CdvPurchase {
                     this.log.info('Receipt refreshed.');
                     applicationReceipt = result;
                 }
-                const transaction = skReceipt.transactions.slice(-1)[0] as (SKTransaction | undefined);
                 return {
                     id: applicationReceipt.bundleIdentifier,
                     type: ProductType.APPLICATION,

@@ -13,6 +13,7 @@ Entry class of the plugin.
 ### Properties
 
 - [applicationUsername](CdvPurchase.Store.md#applicationusername)
+- [environment](CdvPurchase.Store.md#environment)
 - [log](CdvPurchase.Store.md#log)
 - [minTimeBetweenUpdates](CdvPurchase.Store.md#mintimebetweenupdates)
 - [validator](CdvPurchase.Store.md#validator)
@@ -39,6 +40,7 @@ Entry class of the plugin.
 - [get](CdvPurchase.Store.md#get)
 - [getAdapter](CdvPurchase.Store.md#getadapter)
 - [getApplicationUsername](CdvPurchase.Store.md#getapplicationusername)
+- [getEnvironment](CdvPurchase.Store.md#getenvironment)
 - [initialize](CdvPurchase.Store.md#initialize)
 - [manageBilling](CdvPurchase.Store.md#managebilling)
 - [manageSubscriptions](CdvPurchase.Store.md#managesubscriptions)
@@ -53,6 +55,7 @@ Entry class of the plugin.
 - [restorePurchases](CdvPurchase.Store.md#restorepurchases)
 - [update](CdvPurchase.Store.md#update)
 - [when](CdvPurchase.Store.md#when)
+- [userIdToUUID](CdvPurchase.Store.md#useridtouuid)
 
 ## Constructors
 
@@ -74,6 +77,16 @@ Return the identifier of the user for your application.
 
 **Note:** Apple AppStore requires an UUIDv4 if you want it to appear as the "appAccountToken" in
 the transaction data.
+
+___
+
+### environment
+
+• **environment**: ``"production"`` \| ``"sandbox"`` = `'production'`
+
+The detected environment: 'production' or 'sandbox'.
+Defaults to 'production'. Set automatically during initialize() on iOS
+debug builds via cordova.plugins.DeviceMeta.
 
 ___
 
@@ -408,6 +421,24 @@ Get the application username as a string by either calling or returning [Store.a
 #### Returns
 
 `undefined` \| `string`
+
+___
+
+### getEnvironment
+
+▸ **getEnvironment**(): `Promise`\<``"production"`` \| ``"sandbox"``\>
+
+Detect whether the app is running in a sandbox (iOS debug) or production environment.
+
+- Android always returns 'production' (no sandbox concept at this layer).
+- iOS uses cordova.plugins.DeviceMeta; if the build is a debug build, returns 'sandbox'.
+- If DeviceMeta is unavailable, defaults to 'production' and logs a warning.
+
+The result is cached — subsequent calls return the same promise.
+
+#### Returns
+
+`Promise`\<``"production"`` \| ``"sandbox"``\>
 
 ___
 
@@ -753,3 +784,30 @@ store.when().receiptUpdated(receipt => {
   }
 });
 ```
+
+___
+
+### userIdToUUID
+
+▸ **userIdToUUID**(`userId`): `string`
+
+Convert a user ID string into a deterministic UUID (v4-shaped).
+
+Each character is hex-encoded (2 hex digits per char), the result is
+zero-padded to 32 hex characters, then formatted as 8-4-4-4-12.
+
+Apple requires a valid UUID for `appAccountToken`. This lets you
+derive one from an arbitrary user identifier (e.g. "U1234567890")
+and reverse it server-side.
+
+#### Parameters
+
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `userId` | `string` | The application-specific user identifier. |
+
+#### Returns
+
+`string`
+
+A UUID string like "55313233-3435-3637-3839-300000000000"

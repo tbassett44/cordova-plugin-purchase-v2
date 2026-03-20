@@ -9,6 +9,7 @@ Optional options for the AppleAppStore adapter
 ### Properties
 
 - [autoFinish](CdvPurchase.AppleAppStore.AdapterOptions.md#autofinish)
+- [debug](CdvPurchase.AppleAppStore.AdapterOptions.md#debug)
 - [discountEligibilityDeterminer](CdvPurchase.AppleAppStore.AdapterOptions.md#discounteligibilitydeterminer)
 - [needAppReceipt](CdvPurchase.AppleAppStore.AdapterOptions.md#needappreceipt)
 
@@ -23,6 +24,19 @@ Auto-finish pending transaction
 Use this if the transaction queue is filled with unwanted transactions (in development).
 It's safe to keep this option to "true" when using a receipt validation server and you only
 sell subscriptions.
+
+___
+
+### debug
+
+• `Optional` **debug**: `boolean`
+
+Enable verbose native (Swift) logging.
+
+When true, the plugin calls the native `debug` command on the Swift side,
+which sets `debugEnabled = true` so every `log()` call in Swift is printed
+to the Xcode console. Equivalent to setting `store.verbosity = DEBUG` but
+scoped to the native layer only.
 
 ___
 

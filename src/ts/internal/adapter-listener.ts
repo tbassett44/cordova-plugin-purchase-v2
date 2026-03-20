@@ -122,36 +122,51 @@ namespace CdvPurchase
                 const receipts = this.updatedReceiptsToProcess;
                 this.updatedReceiptsToProcess = [];
                 receipts.forEach(receipt => {
+                    this.log.debug(`[_processUpdatedReceipts] receipt platform=${receipt.platform} transactions=${receipt.transactions.length}`);
                     this.delegate.updatedReceiptCallbacks.trigger(receipt, 'adapterListener_receiptsUpdated');
                     receipt.transactions.forEach(transaction => {
                         const transactionToken = StoreAdapterListener.makeTransactionToken(transaction);
                         const tokenWithState = transactionToken + '@' + transaction.state;
                         const lastState = this.lastTransactionState[transactionToken];
+                        this.log.debug(`[_processUpdatedReceipts] transaction token=${transactionToken} state=${transaction.state} lastState=${lastState} products=${JSON.stringify(transaction.products)}`);
                         // Retrigger "approved", so validation is rerun on potential update.
                         if (transaction.state === TransactionState.APPROVED) {
-                            // prevent calling approved twice in a very short period (60 seconds).
+                            // prevent calling approved twice in a very short period (10 seconds).
                             const lastCalled = this.lastCallTimeForState[tokenWithState] ?? 0;
-                            if (now - lastCalled > 60000) {
+                            const elapsed = now - lastCalled;
+                            this.log.debug(`[_processUpdatedReceipts] APPROVED: lastCalled=${lastCalled} elapsed=${elapsed}ms threshold=10000ms`);
+                            if (elapsed > 10000) {
+                                this.log.debug(`[_processUpdatedReceipts] -> triggering approvedCallbacks for ${transactionToken}`);
                                 this.lastCallTimeForState[tokenWithState] = now;
                                 this.delegate.approvedCallbacks.trigger(transaction, 'adapterListener_receiptsUpdated_approved');
                             }
                             else {
-                                this.log.debug(`Skipping ${tokenWithState}, because it has been last called ${lastCalled > 0 ? Math.round(now - lastCalled) + 'ms ago (' + now + '-' + lastCalled + ')' : 'never'}`);
+                                this.log.debug(`[_processUpdatedReceipts] -> SKIPPING approved for ${tokenWithState} (called ${elapsed}ms ago)`);
                             }
                         }
                         else if (lastState !== transaction.state) {
+                            this.log.debug(`[_processUpdatedReceipts] state changed: ${lastState} -> ${transaction.state} for ${transactionToken}`);
                             if (transaction.state === TransactionState.INITIATED) {
+                                this.log.debug(`[_processUpdatedReceipts] -> triggering initiatedCallbacks for ${transactionToken}`);
                                 this.lastCallTimeForState[tokenWithState] = now;
                                 this.delegate.initiatedCallbacks.trigger(transaction, 'adapterListener_receiptsUpdated_initiated');
                             }
                             else if (transaction.state === TransactionState.FINISHED) {
+                                this.log.debug(`[_processUpdatedReceipts] -> triggering finishedCallbacks for ${transactionToken}`);
                                 this.lastCallTimeForState[tokenWithState] = now;
                                 this.delegate.finishedCallbacks.trigger(transaction, 'adapterListener_receiptsUpdated_finished');
                             }
                             else if (transaction.state === TransactionState.PENDING) {
+                                this.log.debug(`[_processUpdatedReceipts] -> triggering pendingCallbacks for ${transactionToken}`);
                                 this.lastCallTimeForState[tokenWithState] = now;
                                 this.delegate.pendingCallbacks.trigger(transaction, 'adapterListener_receiptsUpdated_pending');
                             }
+                            else {
+                                this.log.debug(`[_processUpdatedReceipts] -> unhandled state: ${transaction.state} for ${transactionToken}`);
+                            }
+                        }
+                        else {
+                            this.log.debug(`[_processUpdatedReceipts] no state change for ${transactionToken} (still ${transaction.state}), skipping`);
                         }
                         this.lastTransactionState[transactionToken] = transaction.state;
                     });

@@ -110,6 +110,38 @@ namespace CdvPurchase {
         }
 
         /**
+         * Convert a user ID string into a deterministic UUID (v4-shaped).
+         *
+         * Each character is hex-encoded (2 hex digits per char), the result is
+         * zero-padded to 32 hex characters, then formatted as 8-4-4-4-12.
+         *
+         * Apple requires a valid UUID for `appAccountToken`. This lets you
+         * derive one from an arbitrary user identifier (e.g. "U1234567890")
+         * and reverse it server-side.
+         *
+         * @param userId  The application-specific user identifier.
+         * @returns A UUID string like "55313233-3435-3637-3839-300000000000"
+         */
+        static userIdToUUID(userId: string): string {
+            if (userId.length > 16) {
+                throw new Error('userIdToUUID: userId must be 16 characters or fewer (got ' + userId.length + ')');
+            }
+            let hex = '';
+            for (let i = 0; i < userId.length; i++) {
+                const code = userId.charCodeAt(i).toString(16);
+                hex += code.length < 2 ? '0' + code : code;
+            }
+            while (hex.length < 32) {
+                hex += '0';
+            }
+            return hex.substring(0, 8) + '-' +
+                   hex.substring(8, 12) + '-' +
+                   hex.substring(12, 16) + '-' +
+                   hex.substring(16, 20) + '-' +
+                   hex.substring(20, 32);
+        }
+
+        /**
          * URL or implementation of the receipt validation service
          *
          * @example
@@ -311,6 +343,11 @@ namespace CdvPurchase {
             }
             this.log.info('initialize(' + JSON.stringify(platforms) + ') v' + PLUGIN_VERSION);
             this.initializedHasBeenCalled = true;
+            // Detect environment before proceeding
+            const env = await this.getEnvironment();
+            this.log.info('environment: ' + env);
+            // Apply environment-specific config from platform options
+            this._applyEnvironmentConfig(env, platforms);
             this.lastUpdate = +new Date();
             const store = this;
             const ret = this.adapters.initialize(platforms, {
@@ -811,6 +848,88 @@ namespace CdvPurchase {
          * Version of the plugin currently installed.
          */
         public version = PLUGIN_VERSION;
+
+        /**
+         * The detected environment: 'production' or 'sandbox'.
+         * Defaults to 'production'. Set automatically during initialize() on iOS
+         * debug builds via cordova.plugins.DeviceMeta.
+         */
+        public environment: 'production' | 'sandbox' = 'production';
+
+        /** Cached promise so getEnvironment() only runs detection once */
+        private _environmentPromise: Promise<'production' | 'sandbox'> | undefined;
+
+        /**
+         * Apply environment-specific configuration from the platform options
+         * passed to initialize().
+         *
+         * Each PlatformWithOptions entry may include `production` and/or `sandbox`
+         * keys with `{ validator: string }`. The method picks the one matching the
+         * detected environment and sets `store.validator`.
+         *
+         * In sandbox mode, `minTimeBetweenUpdates` is also set to 0.
+         *
+         * @internal
+         */
+        private _applyEnvironmentConfig(env: 'production' | 'sandbox', platforms: (Platform | PlatformWithOptions)[]) {
+            for (const p of platforms) {
+                if (typeof p === 'string') continue;
+                const opts = (p as any).options;
+                if (!opts) continue;
+                const envOpts = opts[env];
+                if (envOpts && envOpts.validator) {
+                    this.validator = envOpts.validator;
+                    this.log.info('validator set from options.' + env + '.validator: ' + this.validator);
+                }
+            }
+            if (env === 'sandbox') {
+                this.minTimeBetweenUpdates = 0;
+                this.log.info('minTimeBetweenUpdates set to 0 (sandbox)');
+            }
+        }
+
+        /**
+         * Detect whether the app is running in a sandbox (iOS debug) or production environment.
+         *
+         * - Android always returns 'production' (no sandbox concept at this layer).
+         * - iOS uses cordova.plugins.DeviceMeta; if the build is a debug build, returns 'sandbox'.
+         * - If DeviceMeta is unavailable, defaults to 'production' and logs a warning.
+         *
+         * The result is cached — subsequent calls return the same promise.
+         */
+        async getEnvironment(): Promise<'production' | 'sandbox'> {
+            if (this._environmentPromise) return this._environmentPromise;
+            this._environmentPromise = new Promise<'production' | 'sandbox'>((resolve) => {
+                const cordova = (window as any).cordova;
+                if (!cordova?.plugins?.DeviceMeta?.getDeviceMeta) {
+                    console.warn('⚠️ cordova.plugins.DeviceMeta not available — defaulting to production');
+                    this.environment = 'production';
+                    return resolve('production');
+                }
+                const device = (window as any).device;
+                if (device?.platform === 'Android') {
+                    console.log('Android device — no sandbox, using production');
+                    this.environment = 'production';
+                    return resolve('production');
+                }
+                console.log('iOS device — checking sandbox mode via DeviceMeta…');
+                cordova.plugins.DeviceMeta.getDeviceMeta((deviceInfo: any) => {
+                    if (deviceInfo?.debug) {
+                        this.environment = 'sandbox';
+                        console.log('%c ⚠️  SANDBOX MODE  ⚠️ ', 'background:#f5a623;color:#000;font-size:16px;font-weight:bold;padding:4px 12px;border-radius:4px;');
+                        resolve('sandbox');
+                    } else {
+                        this.environment = 'production';
+                        resolve('production');
+                    }
+                }, () => {
+                    console.warn('⚠️ DeviceMeta.getDeviceMeta failed — defaulting to production');
+                    this.environment = 'production';
+                    resolve('production');
+                });
+            });
+            return this._environmentPromise;
+        }
     }
 
     /**

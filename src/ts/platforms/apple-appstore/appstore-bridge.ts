@@ -175,7 +175,7 @@ namespace CdvPurchase {
                 ready: () => void;
 
                 /** Called when a transaction is in "Purchased" state */
-                purchased: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string) => void;
+                purchased: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string, jwsRepresentation?: string) => void;
 
                 /** Called when a transaction has been enqueued */
                 purchaseEnqueued: (productId: string, quantity: number) => void;
@@ -280,8 +280,8 @@ namespace CdvPurchase {
                     errorText: string | undefined;
                     transactionIdentifier: string;
                     productId: string;
-                    /** @deprecated */
-                    transactionReceipt: never;
+                    /** JWS representation for StoreKit 2 */
+                    jwsRepresentation: string | undefined;
                     originalTransactionIdentifier: string | undefined;
                     transactionDate: string | undefined;
                     discountId: string | undefined;
@@ -383,7 +383,7 @@ namespace CdvPurchase {
                  * @param {String} productId The product identifier. e.g. "com.example.MyApp.myproduct"
                  * @param {int} quantity Quantity of product to purchase
                  */
-                purchase(productId: string, quantity: number, applicationUsername: string | undefined, discount: PaymentDiscount | undefined, success: () => void, error: () => void) {
+                purchase(productId: string, quantity: number, applicationUsername: string | undefined, discount: PaymentDiscount | undefined, success: () => void, error: (message?: string) => void, canPurchase: boolean = true) {
                     quantity = (quantity | 0) || 1;
                     const options = this.options;
 
@@ -406,15 +406,15 @@ namespace CdvPurchase {
                         }
                         protectCall(success, 'purchase.success');
                     };
-                    const purchaseFailed = () => {
-                        const errMsg = 'Purchase failed: ' + productId;
+                    const purchaseFailed = (nativeMessage?: string) => {
+                        const errMsg = nativeMessage || ('Purchase failed: ' + productId);
                         log(errMsg);
                         if (typeof options.error === 'function') {
                             protectCall(options.error, 'options.error', ErrorCode.PURCHASE, errMsg, {productId, quantity});
                         }
-                        protectCall(error, 'purchase.error');
+                        protectCall(error, 'purchase.error', errMsg);
                     };
-                    exec('purchase', [productId, quantity, applicationUsername, discount || {}], purchaseOk, purchaseFailed);
+                    exec('purchase', [productId, quantity, applicationUsername, discount || {}, canPurchase], purchaseOk, purchaseFailed);
                 }
 
                 /**
@@ -433,6 +433,16 @@ namespace CdvPurchase {
                     this.needRestoreNotification = true;
                     this.clearRestoredTransactions(); // Clear any previous restore transactions
                     exec('restoreCompletedTransactions', [], callback, callback);
+                }
+
+                /**
+                 * Silently fetch current active entitlements from StoreKit 2
+                 * without triggering AppStore.sync() (no sign-in dialog).
+                 *
+                 * Callback receives an array of { productId, expirationDate } objects.
+                 */
+                getCurrentEntitlements(success: (entitlements: {productId: string, expirationDate?: string}[]) => void, error: (msg: string) => void) {
+                    exec('getCurrentEntitlements', [], success, error);
                 }
 
                 manageSubscriptions(callback?: Callback<any>) {
@@ -528,7 +538,7 @@ namespace CdvPurchase {
                 finalizeTransactionUpdates() {
                     for (let i = 0; i < this.pendingUpdates.length; ++i) {
                         const args = this.pendingUpdates[i];
-                        this.transactionUpdated(args.state, args.errorCode, args.errorText, args.transactionIdentifier, args.productId, args.transactionReceipt, args.originalTransactionIdentifier, args.transactionDate, args.discountId, args.expirationDate);
+                        this.transactionUpdated(args.state, args.errorCode, args.errorText, args.transactionIdentifier, args.productId, args.jwsRepresentation, args.originalTransactionIdentifier, args.transactionDate, args.discountId, args.expirationDate);
                     }
                     this.pendingUpdates = [];
                 }
@@ -541,10 +551,11 @@ namespace CdvPurchase {
                 //
                 // Note that it may eventually be called before initialization... unfortunately.
                 // In this case, we'll just keep pending updates in a list for later processing.
-                transactionUpdated(state: TransactionState, errorCode: ErrorCode | undefined, errorText: string | undefined, transactionIdentifier: string, productId: string, transactionReceipt: never, originalTransactionIdentifier: string | undefined, transactionDate: string | undefined, discountId: string | undefined, expirationDate: string | undefined) {
+                // Position 5 is the JWS representation for StoreKit 2 (was transactionReceipt for StoreKit 1)
+                transactionUpdated(state: TransactionState, errorCode: ErrorCode | undefined, errorText: string | undefined, transactionIdentifier: string, productId: string, jwsRepresentation: string | undefined, originalTransactionIdentifier: string | undefined, transactionDate: string | undefined, discountId: string | undefined, expirationDate: string | undefined) {
 
                     if (!this.initialized) {
-                        this.pendingUpdates.push({ state, errorCode, errorText, transactionIdentifier, productId, transactionReceipt, originalTransactionIdentifier, transactionDate, discountId, expirationDate });
+                        this.pendingUpdates.push({ state, errorCode, errorText, transactionIdentifier, productId, jwsRepresentation, originalTransactionIdentifier, transactionDate, discountId, expirationDate });
                         return;
                     }
                     log("transaction updated:" + transactionIdentifier + " state:" + state + " product:" + productId + " expires:" + expirationDate);
@@ -563,7 +574,7 @@ namespace CdvPurchase {
                             protectCall(this.options.purchasing, 'options.purchasing', productId);
                             return;
                         case "PaymentTransactionStatePurchased":
-                            protectCall(this.options.purchased, 'options.purchase', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate);
+                            protectCall(this.options.purchased, 'options.purchase', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation);
                             return;
                         case "PaymentTransactionStateDeferred":
                             protectCall(this.options.deferred, 'options.deferred', productId);

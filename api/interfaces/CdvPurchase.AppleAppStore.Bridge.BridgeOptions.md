@@ -209,13 +209,13 @@ ___
 
 ### purchased
 
-• **purchased**: (`transactionIdentifier`: `string`, `productId`: `string`, `originalTransactionIdentifier?`: `string`, `transactionDate?`: `string`, `discountId?`: `string`) => `void`
+• **purchased**: (`transactionIdentifier`: `string`, `productId`: `string`, `originalTransactionIdentifier?`: `string`, `transactionDate?`: `string`, `discountId?`: `string`, `expirationDate?`: `string`, `jwsRepresentation?`: `string`) => `void`
 
 Called when a transaction is in "Purchased" state
 
 #### Type declaration
 
-▸ (`transactionIdentifier`, `productId`, `originalTransactionIdentifier?`, `transactionDate?`, `discountId?`): `void`
+▸ (`transactionIdentifier`, `productId`, `originalTransactionIdentifier?`, `transactionDate?`, `discountId?`, `expirationDate?`, `jwsRepresentation?`): `void`
 
 ##### Parameters
 
@@ -226,6 +226,8 @@ Called when a transaction is in "Purchased" state
 | `originalTransactionIdentifier?` | `string` |
 | `transactionDate?` | `string` |
 | `discountId?` | `string` |
+| `expirationDate?` | `string` |
+| `jwsRepresentation?` | `string` |
 
 ##### Returns
 
@@ -357,13 +359,13 @@ ___
 
 ### restoreTransactionUpdated
 
-• **restoreTransactionUpdated**: (`transactionIdentifier`: `string`, `productId`: `string`, `jwsRepresentation`: `string`, `originalTransactionIdentifier?`: `string`, `transactionDate?`: `string`) => `void`
+• **restoreTransactionUpdated**: (`transactionIdentifier`: `string`, `productId`: `string`, `jwsRepresentation`: `string`, `originalTransactionIdentifier?`: `string`, `transactionDate?`: `string`, `expirationDate?`: `string`) => `void`
 
 Called for each transaction during restore with JWS token
 
 #### Type declaration
 
-▸ (`transactionIdentifier`, `productId`, `jwsRepresentation`, `originalTransactionIdentifier?`, `transactionDate?`): `void`
+▸ (`transactionIdentifier`, `productId`, `jwsRepresentation`, `originalTransactionIdentifier?`, `transactionDate?`, `expirationDate?`): `void`
 
 ##### Parameters
 
@@ -374,6 +376,7 @@ Called for each transaction during restore with JWS token
 | `jwsRepresentation` | `string` |
 | `originalTransactionIdentifier?` | `string` |
 | `transactionDate?` | `string` |
+| `expirationDate?` | `string` |
 
 ##### Returns
 

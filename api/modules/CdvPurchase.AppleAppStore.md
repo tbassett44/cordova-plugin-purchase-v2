@@ -70,17 +70,20 @@ ___
 
 ### PaymentMonitor
 
-Ƭ **PaymentMonitor**: (`status`: [`PaymentMonitorStatus`](CdvPurchase.AppleAppStore.md#paymentmonitorstatus)) => `void`
+Ƭ **PaymentMonitor**: (`status`: [`PaymentMonitorStatus`](CdvPurchase.AppleAppStore.md#paymentmonitorstatus), `code?`: [`ErrorCode`](../enums/CdvPurchase.ErrorCode.md), `message?`: `string`, `productId?`: `string`) => `void`
 
 #### Type declaration
 
-▸ (`status`): `void`
+▸ (`status`, `code?`, `message?`, `productId?`): `void`
 
 ##### Parameters
 
 | Name | Type |
 | :------ | :------ |
 | `status` | [`PaymentMonitorStatus`](CdvPurchase.AppleAppStore.md#paymentmonitorstatus) |
+| `code?` | [`ErrorCode`](../enums/CdvPurchase.ErrorCode.md) |
+| `message?` | `string` |
+| `productId?` | `string` |
 
 ##### Returns
 

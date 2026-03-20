@@ -22,6 +22,7 @@ Adapter for Apple AppStore using StoreKit version 1
 - [autoFinish](CdvPurchase.AppleAppStore.Adapter.md#autofinish)
 - [bridge](CdvPurchase.AppleAppStore.Adapter.md#bridge)
 - [context](CdvPurchase.AppleAppStore.Adapter.md#context)
+- [debugEnabled](CdvPurchase.AppleAppStore.Adapter.md#debugenabled)
 - [discountEligibilityDeterminer](CdvPurchase.AppleAppStore.Adapter.md#discounteligibilitydeterminer)
 - [forceReceiptReload](CdvPurchase.AppleAppStore.Adapter.md#forcereceiptreload)
 - [id](CdvPurchase.AppleAppStore.Adapter.md#id)
@@ -117,6 +118,14 @@ ___
 ### context
 
 • **context**: `AdapterContext`
+
+___
+
+### debugEnabled
+
+• **debugEnabled**: `boolean`
+
+True to enable verbose native Swift logging
 
 ___
 
