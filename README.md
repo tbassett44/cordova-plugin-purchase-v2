@@ -313,8 +313,9 @@ store.initialize([{
 | `needAppReceipt` | `boolean` | `true` | Set to `false` to skip loading the legacy App Store receipt. Recommended when using StoreKit 2 JWS-only validation, which avoids an unnecessary disk read at startup. |
 | `autoFinish` | `boolean` | `false` | Automatically finish all transactions as soon as they are approved. Use only in development when you want to clear a backlogged transaction queue. |
 | `debug` | `boolean` | `false` | Enable verbose native Swift logging. When `true`, every internal `log()` call in the Swift plugin layer is printed to the Xcode console. Useful during development to trace subscription status checks, StoreKit 2 entitlement lookups, and upgrade/downgrade detection without changing `store.verbosity` globally. |
-| `production` | `object` | — | Object with `{ validator: string }`. Used when the app is running in a production environment. |
-| `sandbox` | `object` | — | Object with `{ validator: string }`. Used when the app is running in a sandbox (debug) environment. |
+| `production` | `object` | — | Object with `{ validator: string, restore: string }`. Used when the app is running in a production environment. |
+| `sandbox` | `object` | — | Object with `{ validator: string, restore: string }`. Used when the app is running in a sandbox (debug) environment. |
+| `restore` | `string` | — | URL of the server restore endpoint (e.g. `https://your-server.com/iap/restore/apple`). Set at the top-level or inside `production`/`sandbox` blocks. Automatically assigned to `store.restoreUrl` on init. |
 
 > **Tip:** `debug: true` is equivalent to setting `store.verbosity = CdvPurchase.LogLevel.DEBUG` but scoped only to the native layer — JS-level log volume stays unchanged.
 
@@ -393,6 +394,28 @@ phone.iap = {
 - `needAppReceipt: false` prevents the legacy `SKReceiptRefreshRequest` that can trigger a login prompt
 - `getCurrentEntitlements` reads from `Transaction.currentEntitlements` — local only, no network
 
+**Shortcut: `store.currentEntitlement`**
+
+After `initialize()` resolves, the store automatically resolves and caches the active entitlement on `store.currentEntitlement`. You can use this instead of calling the bridge directly:
+
+```javascript
+CdvPurchase.store.initialize([...]).then(function() {
+  // store.currentEntitlement is already resolved
+  var entitlement = CdvPurchase.store.currentEntitlement;
+  if (entitlement) {
+    console.log('Active entitlement:', entitlement.productId, 'on', entitlement.platform);
+  } else {
+    console.log('No active entitlement');
+  }
+});
+```
+
+| Value | Meaning |
+|-------|---------|
+| `null` | Not yet resolved (init still in progress) |
+| `false` | Resolved — no active entitlement |
+| `{ productId, platform, expirationDate?, transactionId?, purchaseDate? }` | Active entitlement |
+
 When the user later navigates to the subscription page, you can skip re-initialization:
 
 ```javascript
@@ -404,6 +427,54 @@ if (phone.iap.status === 'ready') {
   CdvPurchase.store.initialize([{ platform: p, options: phone.iap.getOptions() }]);
 }
 ```
+
+## Restore & Sync: `store.restoreAndSync()`
+
+`restoreAndSync()` combines the native platform restore flow with a server-side sync in one call. It:
+1. Triggers the native restore on Apple (StoreKit 2) or Google Play
+2. Collects JWS tokens (iOS) or purchase tokens (Android)
+3. POSTs them to `store.restoreUrl` for server-side entitlement re-validation
+
+**Setup** — set `restoreUrl` via the `restore` option in `initialize()`:
+
+```javascript
+store.initialize([{
+  platform: CdvPurchase.Platform.APPLE_APPSTORE,
+  options: {
+    production: {
+      validator: 'https://your-server.com/iap/validate/apple',
+      restore:   'https://your-server.com/iap/restore/apple'
+    },
+    sandbox: {
+      validator: 'https://your-server.com/iap_sandbox/validate/apple',
+      restore:   'https://your-server.com/iap_sandbox/restore/apple'
+    }
+  }
+}]);
+```
+
+**Usage:**
+
+```javascript
+CdvPurchase.store.restoreAndSync({
+  platform: CdvPurchase.Platform.APPLE_APPSTORE,
+  userId: 'user123',
+  headers: { 'Authorization': 'Bearer ' + authToken }, // optional
+  onStart:          () => showSpinner(),
+  onSuccess:        (result) => console.log('Restored', result.restored, 'purchase(s)'),
+  onError:          (err)    => console.error('Restore failed:', err),
+  onNoTransactions: ()       => console.log('Nothing to restore')
+});
+```
+
+| Callback | When called |
+|----------|-------------|
+| `onStart` | Native restore begins |
+| `onSuccess(result)` | Server responded OK — `result.restored` is the count re-validated |
+| `onError(message)` | Any failure: no `restoreUrl`, native error, or server error |
+| `onNoTransactions` | Native restore completed but found zero transactions |
+
+> **Requires** `store.restoreUrl` to be set (via `options.restore` or directly). If not set, `onError` is called immediately.
 
 ## Utility: `Store.userIdToUUID()`
 
@@ -435,7 +506,7 @@ iap.uuidToUserId('55313233-3435-3637-3839-300000000000');
 // => "U1234567890"
 ```
 
-This is used automatically by the webhook handler to extract `userId` from `appAccountToken` in Apple notifications.
+This is used automatically by the webhook handler to extract `userId` from `appAccountToken` in Apple notifications, and from `obfuscatedExternalAccountId` in Google Play notifications. Both platforms follow the same encode/decode pattern — set `store.applicationUsername = CdvPurchase.Store.userIdToUUID(userId)` before purchasing and the webhooks will decode it automatically.
 
 ## Server-Side IAP Service (purchase_api.js)
 
@@ -578,8 +649,10 @@ Your config file should have both `iap` (production) and `iap_sandbox` (sandbox)
 ### Google RTDN Setup
 
 1. Create a Pub/Sub topic in Google Cloud Console
-2. Configure a push subscription pointing to: `https://your-server.com/iap/webhook/google?userId=...`
+2. Configure a push subscription pointing to: `https://your-server.com/iap/webhook/google`
 3. Link the topic to your Play Console app
+
+**userId resolution in the Google webhook:** The webhook automatically decodes `obfuscatedExternalAccountId` from the purchase using `uuidToUserId()` — the same reverse of `Store.userIdToUUID()` used on the client. If `obfuscatedExternalAccountId` is not present (e.g. older purchases), it falls back to a `?userId=` query parameter on the webhook URL.
 
 ## Extra Resources
 
