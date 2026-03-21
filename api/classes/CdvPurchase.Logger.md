@@ -130,7 +130,7 @@ This method is mostly used when executing user registered callbacks.
 | Name | Type | Description |
 | :------ | :------ | :------ |
 | `context` | `string` | a string describing why the method was called |
-| `err` | `string` \| `Error` | - |
+| `err` | `string` \| `Error` | a javascript Error object thrown by an exception |
 
 #### Returns
 

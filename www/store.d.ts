@@ -195,7 +195,7 @@ declare namespace CdvPurchase {
          * This method is mostly used when executing user registered callbacks.
          *
          * @param context - a string describing why the method was called
-         * @param error - a javascript Error object thrown by an exception
+         * @param err - a javascript Error object thrown by an exception
          */
         logCallbackException(context: string, err: Error | string): void;
         /**
@@ -864,6 +864,20 @@ declare namespace CdvPurchase {
          */
         applicationUsername?: string | (() => string | undefined);
         /**
+         * The currently active entitlement, resolved automatically during initialize().
+         *
+         * - `null` before initialization completes.
+         * - `false` if no active entitlement was found.
+         * - An entitlement object if an active (non-expired) entitlement exists.
+         */
+        currentEntitlement: {
+            productId: string;
+            expirationDate?: number;
+            transactionId?: string;
+            purchaseDate?: number;
+            platform: string;
+        } | false | null;
+        /**
          * Get the application username as a string by either calling or returning {@link Store.applicationUsername}
         */
         getApplicationUsername(): string | undefined;
@@ -922,6 +936,15 @@ declare namespace CdvPurchase {
          * ]
          */
         validator_privacy_policy: PrivacyPolicyItem | PrivacyPolicyItem[] | undefined;
+        /**
+         * URL for the server-side restore endpoint.
+         *
+         * Automatically set from platform options during `initialize()` based on
+         * the detected environment (production/sandbox) and platform (apple/google).
+         *
+         * Used by {@link Store.restoreAndSync}.
+         */
+        restoreUrl: string | undefined;
         /** List of callbacks for the "ready" events */
         private _readyCallbacks;
         /** Listens to adapters */
@@ -1161,6 +1184,39 @@ declare namespace CdvPurchase {
          */
         restorePurchases(): Promise<IError | undefined>;
         /**
+         * Restore purchases from the native store and sync them with your server.
+         *
+         * This method handles the full restore flow:
+         * 1. Calls the native `restorePurchases()` to refresh transaction state.
+         * 2. Collects transactions (iOS: JWS tokens from bridge, Android: purchase tokens from receipts).
+         * 3. POSTs them to your server's restore endpoint via `fetch()`.
+         * 4. Calls `store.update()` on success to refresh product state.
+         *
+         * Callbacks allow framework-agnostic event handling (UI updates, toasts, etc.).
+         *
+         * The restore URL is read from `store.restoreUrl`, which is automatically
+         * set during `initialize()` from platform options (e.g. `options.production.apple.restore`).
+         *
+         * @param options.userId           The current user's ID.
+         * @param options.headers          Optional extra headers for the fetch request.
+         * @param options.onStart          Called when the restore process begins.
+         * @param options.onSuccess        Called with the server response on success.
+         * @param options.onError          Called with an error message string on failure.
+         * @param options.onNoTransactions Called when native restore found no transactions.
+         */
+        restoreAndSync(options: {
+            userId: string;
+            headers?: Record<string, string>;
+            onStart?: () => void;
+            onSuccess?: (result: {
+                ok: boolean;
+                restored: number;
+                [key: string]: any;
+            }) => void;
+            onError?: (error: string) => void;
+            onNoTransactions?: () => void;
+        }): Promise<void>;
+        /**
          * Open the subscription management interface for the selected platform.
          *
          * If platform is not specified, the first available platform will be used.
@@ -1189,6 +1245,27 @@ declare namespace CdvPurchase {
          * - on Android: `GOOGLE_PLAY`
          */
         defaultPlatform(): Platform;
+        /**
+         * Unified entitlement check that works across iOS and Android.
+         *
+         * - **iOS:** Calls the native `getCurrentEntitlements` bridge method
+         *   (StoreKit 2 `Transaction.currentEntitlements`) — no sign-in prompt.
+         * - **Android:** Reads `localReceipts` (populated by `getPurchases()` during
+         *   `initialize()`) and filters for active, non-consumed, non-pending transactions.
+         *
+         * Returns a normalized array of entitlement objects to the success callback:
+         * `{ productId, expirationDate?, transactionId?, purchaseDate?, platform }`
+         *
+         * @param success  Called with an array of active entitlements.
+         * @param error    Called if the underlying platform call fails.
+         */
+        getCurrentEntitlements(success: (entitlements: {
+            productId: string;
+            expirationDate?: number;
+            transactionId?: string;
+            purchaseDate?: number;
+            platform: string;
+        }[]) => void, error?: (msg: string) => void): void;
         /**
          * Register an error handler.
          *
@@ -1219,12 +1296,29 @@ declare namespace CdvPurchase {
         /** Cached promise so getEnvironment() only runs detection once */
         private _environmentPromise;
         /**
+         * If any platform option includes a `getUserId` callback, wire it into
+         * `applicationUsername` as a lazy function that converts the result
+         * through `Store.userIdToUUID()`.
+         *
+         * This means the consuming code only needs to pass `getUserId` in the
+         * options object — the store handles the rest automatically.
+         *
+         * @internal
+         */
+        private _applyGetUserId;
+        /**
          * Apply environment-specific configuration from the platform options
          * passed to initialize().
          *
          * Each PlatformWithOptions entry may include `production` and/or `sandbox`
-         * keys with `{ validator: string }`. The method picks the one matching the
-         * detected environment and sets `store.validator`.
+         * keys with `{ validator: string, restore?: string }`.
+         *
+         * Supports both flat and nested structures:
+         * - Flat:   `options.production.validator`
+         * - Nested: `options.production.apple.validator` / `options.production.google.validator`
+         *
+         * The method picks the one matching the detected environment (and platform
+         * for nested) and sets `store.validator` and `store.restoreUrl`.
          *
          * In sandbox mode, `minTimeBetweenUpdates` is also set to 0.
          *
@@ -2905,25 +2999,12 @@ declare namespace CdvPurchase {
                  * Retrieves localized product data, including price (as localized
                  * string), name, description of multiple products.
                  *
-                 * @param {Array} productIds
-                 *   An array of product identifier strings.
-                 *
-                 * @param {Function} callback
-                 *   Called once with the result of the products request. Signature:
-                 *
-                 *     function(validProducts, invalidProductIds)
-                 *
-                 *   where validProducts receives an array of objects of the form:
-                 *
-                 *     {
-                 *       id: "<productId>",
-                 *       title: "<localised title>",
-                 *       description: "<localised escription>",
-                 *       price: "<localised price>"
-                 *     }
-                 *
-                 *  and invalidProductIds receives an array of product identifier
-                 *  strings which were rejected by the app store.
+                 * @param productIds - An array of product identifier strings.
+                 * @param success - Called once with the result of the products request.
+                 *   Receives `(validProducts, invalidProductIds)` where validProducts
+                 *   is an array of {@link ValidProduct} objects and invalidProductIds
+                 *   is an array of product identifier strings rejected by the store.
+                 * @param error - Called when loading fails.
                  */
                 load(productIds: string[], success: (validProducts: ValidProduct[], invalidProductIds: string[]) => void, error: (code: ErrorCode, message: string) => void): void;
                 finish(transactionId: string, success: () => void, error: (msg: string) => void): void;
@@ -4612,7 +4693,8 @@ declare namespace CdvPurchase {
             /**
              * Obfuscated user account identifier
              *
-             * Default to md5(store.applicationUsername)
+             * Default to store.applicationUsername (the UUID from userIdToUUID).
+             * Passed as-is to Google's setObfuscatedAccountId (max 64 chars).
              */
             accountId?: string;
             /**

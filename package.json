@@ -1,13 +1,12 @@
 {
-  "name": "cordova-plugin-purchase",
-  "version": "13.13.1",
+  "name": "cordova-plugin-purchase-v2",
+  "version": "1.1.1",
   "description": "Cordova Purchase plugin for iOS, Android, Windows (AppStore, Play, UWP)",
   "cordova": {
-    "id": "cordova-plugin-purchase",
+    "id": "cordova-plugin-purchase-v2",
     "platforms": [
       "android",
-      "ios",
-      "wp8"
+      "ios"
     ]
   },
   "repository": {
@@ -27,8 +26,7 @@
     "android",
     "play",
     "appstore",
-    "iaptic",
-    "fovea"
+    "iaptic"
   ],
   "scripts": {
     "test": "cd tests && jest",
@@ -36,12 +34,12 @@
     "typedoc-html": "typedoc --plugin typedoc-theme-hierarchy --theme hierarchy --hideGenerator --excludePrivate --excludeProtected --excludeInternal --disableSources --readme src/ts/README.md --out api-html --pretty --basePath src/ts src/ts/store.ts",
     "typedoc-dev": "typedoc --hideGenerator --readme src/ts/README.md --out api-dev --pretty --plugin typedoc-plugin-markdown --theme markdown --basePath src/ts src/ts/store.ts"
   },
-  "author": "Jean-Christophe Hoelt <hoelt@fovea.cc>",
+  "author": "Juicy Life <juicy@actualize.earth>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/j3k0/cordova-plugin-purchase/issues"
+    "url": "https://github.com/tbassett44/cordova-plugin-purchase-v2/issues"
   },
-  "homepage": "https://github.com/j3k0/cordova-plugin-purchase",
+  "homepage": "https://github.com/tbassett44/cordova-plugin-purchase-v2",
   "devDependencies": {
     "@types/jest": "^29.5.4",
     "iaptic-js": "^1.0.2",

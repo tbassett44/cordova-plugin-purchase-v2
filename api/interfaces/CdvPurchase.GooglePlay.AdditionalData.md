@@ -21,7 +21,8 @@
 
 Obfuscated user account identifier
 
-Default to md5(store.applicationUsername)
+Default to store.applicationUsername (the UUID from userIdToUUID).
+Passed as-is to Google's setObfuscatedAccountId (max 64 chars).
 
 ___
 

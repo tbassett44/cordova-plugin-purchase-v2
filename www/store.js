@@ -288,7 +288,7 @@ var CdvPurchase;
          * This method is mostly used when executing user registered callbacks.
          *
          * @param context - a string describing why the method was called
-         * @param error - a javascript Error object thrown by an exception
+         * @param err - a javascript Error object thrown by an exception
          */
         logCallbackException(context, err) {
             this.warn("A callback in \'" + context + "\' failed with an exception.");
@@ -1529,6 +1529,14 @@ var CdvPurchase;
              * @see {@link LogLevel}
              */
             this.verbosity = CdvPurchase.LogLevel.ERROR;
+            /**
+             * The currently active entitlement, resolved automatically during initialize().
+             *
+             * - `null` before initialization completes.
+             * - `false` if no active entitlement was found.
+             * - An entitlement object if an active (non-expired) entitlement exists.
+             */
+            this.currentEntitlement = null;
             /** List of callbacks for the "ready" events */
             this._readyCallbacks = new CdvPurchase.Internal.ReadyCallbacks(this.log);
             /** Callbacks when a product definition was updated */
@@ -1726,6 +1734,8 @@ var CdvPurchase;
                 }
                 this.log.info('initialize(' + JSON.stringify(platforms) + ') v' + CdvPurchase.PLUGIN_VERSION);
                 this.initializedHasBeenCalled = true;
+                // Wire getUserId from options into applicationUsername (lazy)
+                this._applyGetUserId(platforms);
                 // Detect environment before proceeding
                 const env = yield this.getEnvironment();
                 this.log.info('environment: ' + env);
@@ -1751,6 +1761,28 @@ var CdvPurchase;
                 ret.then(() => {
                     this._readyCallbacks.trigger('initialize_promise_resolved');
                     this.listener.setSupportedPlatforms(this.adapters.list.filter(a => a.isSupported).map(a => a.id));
+                });
+                // Wait for adapters, then auto-resolve current entitlement before returning
+                yield ret;
+                yield new Promise((resolve) => {
+                    this.getCurrentEntitlements((entitlements) => {
+                        const now = Date.now();
+                        let active = false;
+                        for (const e of entitlements) {
+                            const expMs = e.expirationDate || 0;
+                            if (!expMs || expMs > now) {
+                                active = e;
+                                break;
+                            }
+                        }
+                        this.currentEntitlement = active;
+                        this.log.info('currentEntitlement resolved (' + (active ? active.platform : 'none') + ')');
+                        resolve();
+                    }, (err) => {
+                        this.log.warn('currentEntitlement resolution failed: ' + err);
+                        this.currentEntitlement = false;
+                        resolve();
+                    });
                 });
                 return ret;
             });
@@ -2131,6 +2163,138 @@ var CdvPurchase;
             });
         }
         /**
+         * Restore purchases from the native store and sync them with your server.
+         *
+         * This method handles the full restore flow:
+         * 1. Calls the native `restorePurchases()` to refresh transaction state.
+         * 2. Collects transactions (iOS: JWS tokens from bridge, Android: purchase tokens from receipts).
+         * 3. POSTs them to your server's restore endpoint via `fetch()`.
+         * 4. Calls `store.update()` on success to refresh product state.
+         *
+         * Callbacks allow framework-agnostic event handling (UI updates, toasts, etc.).
+         *
+         * The restore URL is read from `store.restoreUrl`, which is automatically
+         * set during `initialize()` from platform options (e.g. `options.production.apple.restore`).
+         *
+         * @param options.userId           The current user's ID.
+         * @param options.headers          Optional extra headers for the fetch request.
+         * @param options.onStart          Called when the restore process begins.
+         * @param options.onSuccess        Called with the server response on success.
+         * @param options.onError          Called with an error message string on failure.
+         * @param options.onNoTransactions Called when native restore found no transactions.
+         */
+        restoreAndSync(options) {
+            var _a, _b;
+            return __awaiter(this, void 0, void 0, function* () {
+                const platform = this.defaultPlatform();
+                this.log.info('restoreAndSync() platform=' + platform);
+                if (!this.restoreUrl) {
+                    this.log.warn('restoreAndSync: no restoreUrl configured — set it in initialize() options');
+                    if (options.onError)
+                        options.onError('No restore URL configured');
+                    return;
+                }
+                if (options.onStart)
+                    options.onStart();
+                // Step 1: Native restore
+                const restoreError = yield this.restorePurchases();
+                if (restoreError) {
+                    const msg = restoreError.message || 'Native restore failed';
+                    this.log.warn('restoreAndSync: native restore failed: ' + msg);
+                    if (options.onError)
+                        options.onError(msg);
+                    return;
+                }
+                // Step 2: Collect transactions — platform-specific
+                let body;
+                if (platform === CdvPurchase.Platform.APPLE_APPSTORE) {
+                    const bridge = (_a = this.getAdapter(platform)) === null || _a === void 0 ? void 0 : _a.bridge;
+                    if (!bridge) {
+                        if (options.onError)
+                            options.onError('StoreKit bridge not available');
+                        return;
+                    }
+                    const restoredTxs = typeof bridge.getRestoredTransactions === 'function'
+                        ? bridge.getRestoredTransactions()
+                        : (bridge.restoredTransactions || []);
+                    const transactions = [];
+                    for (const tx of restoredTxs) {
+                        if (tx.jwsRepresentation) {
+                            transactions.push({ signedTransaction: tx.jwsRepresentation });
+                            this.log.info('restoreAndSync: JWS tx ' + (tx.transactionIdentifier || tx.productId));
+                        }
+                    }
+                    if (transactions.length === 0) {
+                        this.log.info('restoreAndSync: no iOS transactions to restore');
+                        if (options.onNoTransactions)
+                            options.onNoTransactions();
+                        return;
+                    }
+                    body = { userId: options.userId, transactions };
+                }
+                else if (platform === CdvPurchase.Platform.GOOGLE_PLAY) {
+                    const adapter = this.getAdapter(platform);
+                    if (!adapter) {
+                        if (options.onError)
+                            options.onError('Google Play adapter not available');
+                        return;
+                    }
+                    const purchaseTokens = [];
+                    for (const receipt of this.localReceipts) {
+                        if (receipt.platform !== CdvPurchase.Platform.GOOGLE_PLAY)
+                            continue;
+                        for (const tx of receipt.transactions) {
+                            const token = ((_b = tx.nativePurchase) === null || _b === void 0 ? void 0 : _b.purchaseToken) || tx.purchaseToken;
+                            if (token && purchaseTokens.indexOf(token) === -1) {
+                                purchaseTokens.push(token);
+                            }
+                        }
+                    }
+                    if (purchaseTokens.length === 0) {
+                        this.log.info('restoreAndSync: no Android purchase tokens to restore');
+                        if (options.onNoTransactions)
+                            options.onNoTransactions();
+                        return;
+                    }
+                    body = { userId: options.userId, purchaseTokens };
+                }
+                else {
+                    if (options.onError)
+                        options.onError('Unsupported platform for restore: ' + platform);
+                    return;
+                }
+                // Step 3: POST to server
+                try {
+                    const resp = yield fetch(this.restoreUrl, {
+                        method: 'POST',
+                        headers: Object.assign({ 'Content-Type': 'application/json' }, options.headers || {}),
+                        body: JSON.stringify(body),
+                    });
+                    const result = yield resp.json();
+                    if (result.ok) {
+                        this.log.info('restoreAndSync: server restored ' + result.restored + ' purchase(s)');
+                        if (result.restored > 0) {
+                            this.update();
+                        }
+                        if (options.onSuccess)
+                            options.onSuccess(result);
+                    }
+                    else {
+                        const errMsg = result.error || 'Server restore failed';
+                        this.log.warn('restoreAndSync: server error: ' + errMsg);
+                        if (options.onError)
+                            options.onError(errMsg);
+                    }
+                }
+                catch (e) {
+                    const errMsg = e.message || 'Network error during restore';
+                    this.log.warn('restoreAndSync: fetch error: ' + errMsg);
+                    if (options.onError)
+                        options.onError(errMsg);
+                }
+            });
+        }
+        /**
          * Open the subscription management interface for the selected platform.
          *
          * If platform is not specified, the first available platform will be used.
@@ -2182,6 +2346,88 @@ var CdvPurchase;
             }
         }
         /**
+         * Unified entitlement check that works across iOS and Android.
+         *
+         * - **iOS:** Calls the native `getCurrentEntitlements` bridge method
+         *   (StoreKit 2 `Transaction.currentEntitlements`) — no sign-in prompt.
+         * - **Android:** Reads `localReceipts` (populated by `getPurchases()` during
+         *   `initialize()`) and filters for active, non-consumed, non-pending transactions.
+         *
+         * Returns a normalized array of entitlement objects to the success callback:
+         * `{ productId, expirationDate?, transactionId?, purchaseDate?, platform }`
+         *
+         * @param success  Called with an array of active entitlements.
+         * @param error    Called if the underlying platform call fails.
+         */
+        getCurrentEntitlements(success, error) {
+            const platform = this.defaultPlatform();
+            const adapter = this.getAdapter(platform);
+            if (!adapter) {
+                this.log.warn('getCurrentEntitlements: no adapter for platform ' + platform);
+                if (error)
+                    error('No adapter for platform ' + platform);
+                else
+                    success([]);
+                return;
+            }
+            if (platform === CdvPurchase.Platform.APPLE_APPSTORE) {
+                // iOS path — native StoreKit 2 getCurrentEntitlements
+                const bridge = adapter.bridge;
+                if (bridge && typeof bridge.getCurrentEntitlements === 'function') {
+                    bridge.getCurrentEntitlements((rawEntitlements) => {
+                        const result = rawEntitlements.map((e) => ({
+                            productId: e.productId,
+                            expirationDate: e.expirationDate ? parseFloat(e.expirationDate) : undefined,
+                            transactionId: e.transactionId || e.originalTransactionId || undefined,
+                            purchaseDate: e.purchaseDate ? parseFloat(e.purchaseDate) : undefined,
+                            platform: 'ios',
+                        }));
+                        success(result);
+                    }, (errMsg) => {
+                        this.log.warn('getCurrentEntitlements (iOS): ' + errMsg);
+                        if (error)
+                            error(errMsg);
+                        else
+                            success([]);
+                    });
+                }
+                else {
+                    this.log.warn('getCurrentEntitlements: bridge.getCurrentEntitlements not available');
+                    success([]);
+                }
+            }
+            else if (platform === CdvPurchase.Platform.GOOGLE_PLAY) {
+                // Android path — read localReceipts from getPurchases()
+                const now = Date.now();
+                const entitlements = [];
+                for (const receipt of adapter.receipts) {
+                    for (const transaction of receipt.transactions) {
+                        if (transaction.isPending)
+                            continue;
+                        if (transaction.isConsumed)
+                            continue;
+                        // Check expiration
+                        if (transaction.expirationDate && transaction.expirationDate.getTime() <= now)
+                            continue;
+                        for (const prod of transaction.products) {
+                            entitlements.push({
+                                productId: prod.id,
+                                expirationDate: transaction.expirationDate ? transaction.expirationDate.getTime() : undefined,
+                                transactionId: transaction.transactionId,
+                                purchaseDate: transaction.purchaseDate ? transaction.purchaseDate.getTime() : undefined,
+                                platform: 'android',
+                            });
+                        }
+                    }
+                }
+                success(entitlements);
+            }
+            else {
+                // Unsupported platform
+                success([]);
+            }
+        }
+        /**
          * Register an error handler.
          *
          * @param error An error callback that takes the error as an argument
@@ -2203,18 +2449,51 @@ var CdvPurchase;
             this.errorCallbacks.trigger(error, 'triggerError');
         }
         /**
+         * If any platform option includes a `getUserId` callback, wire it into
+         * `applicationUsername` as a lazy function that converts the result
+         * through `Store.userIdToUUID()`.
+         *
+         * This means the consuming code only needs to pass `getUserId` in the
+         * options object — the store handles the rest automatically.
+         *
+         * @internal
+         */
+        _applyGetUserId(platforms) {
+            for (const p of platforms) {
+                if (typeof p === 'string')
+                    continue;
+                const opts = p.options;
+                if (!opts || typeof opts.getUserId !== 'function')
+                    continue;
+                const getUserId = opts.getUserId;
+                this.applicationUsername = () => {
+                    const uid = getUserId();
+                    return uid ? Store.userIdToUUID(uid) : undefined;
+                };
+                this.log.info('applicationUsername wired from options.getUserId (lazy)');
+                return; // first match wins
+            }
+        }
+        /**
          * Apply environment-specific configuration from the platform options
          * passed to initialize().
          *
          * Each PlatformWithOptions entry may include `production` and/or `sandbox`
-         * keys with `{ validator: string }`. The method picks the one matching the
-         * detected environment and sets `store.validator`.
+         * keys with `{ validator: string, restore?: string }`.
+         *
+         * Supports both flat and nested structures:
+         * - Flat:   `options.production.validator`
+         * - Nested: `options.production.apple.validator` / `options.production.google.validator`
+         *
+         * The method picks the one matching the detected environment (and platform
+         * for nested) and sets `store.validator` and `store.restoreUrl`.
          *
          * In sandbox mode, `minTimeBetweenUpdates` is also set to 0.
          *
          * @internal
          */
         _applyEnvironmentConfig(env, platforms) {
+            const platformKey = this.defaultPlatform() === CdvPurchase.Platform.GOOGLE_PLAY ? 'google' : 'apple';
             for (const p of platforms) {
                 if (typeof p === 'string')
                     continue;
@@ -2222,9 +2501,28 @@ var CdvPurchase;
                 if (!opts)
                     continue;
                 const envOpts = opts[env];
-                if (envOpts && envOpts.validator) {
+                if (!envOpts)
+                    continue;
+                // Try nested structure first (e.g. options.production.apple.validator)
+                const nested = envOpts[platformKey];
+                if (nested) {
+                    if (nested.validator) {
+                        this.validator = nested.validator;
+                        this.log.info('validator set from options.' + env + '.' + platformKey + '.validator: ' + this.validator);
+                    }
+                    if (nested.restore) {
+                        this.restoreUrl = nested.restore;
+                        this.log.info('restoreUrl set from options.' + env + '.' + platformKey + '.restore: ' + this.restoreUrl);
+                    }
+                }
+                // Flat structure fallback (e.g. options.production.validator)
+                if (!this.validator && envOpts.validator) {
                     this.validator = envOpts.validator;
                     this.log.info('validator set from options.' + env + '.validator: ' + this.validator);
+                }
+                if (!this.restoreUrl && envOpts.restore) {
+                    this.restoreUrl = envOpts.restore;
+                    this.log.info('restoreUrl set from options.' + env + '.restore: ' + this.restoreUrl);
                 }
             }
             if (env === 'sandbox') {
@@ -2249,21 +2547,21 @@ var CdvPurchase;
                     var _a, _b;
                     const cordova = window.cordova;
                     if (!((_b = (_a = cordova === null || cordova === void 0 ? void 0 : cordova.plugins) === null || _a === void 0 ? void 0 : _a.DeviceMeta) === null || _b === void 0 ? void 0 : _b.getDeviceMeta)) {
-                        console.warn('⚠️ cordova.plugins.DeviceMeta not available — defaulting to production');
+                        this.log.warn('cordova.plugins.DeviceMeta not available — defaulting to production');
                         this.environment = 'production';
                         return resolve('production');
                     }
                     const device = window.device;
                     if ((device === null || device === void 0 ? void 0 : device.platform) === 'Android') {
-                        console.log('Android device — no sandbox, using production');
+                        this.log.info('Android device — no sandbox, using production');
                         this.environment = 'production';
                         return resolve('production');
                     }
-                    console.log('iOS device — checking sandbox mode via DeviceMeta…');
+                    this.log.info('iOS device — checking sandbox mode via DeviceMeta…');
                     cordova.plugins.DeviceMeta.getDeviceMeta((deviceInfo) => {
                         if (deviceInfo === null || deviceInfo === void 0 ? void 0 : deviceInfo.debug) {
                             this.environment = 'sandbox';
-                            console.log('%c ⚠️  SANDBOX MODE  ⚠️ ', 'background:#f5a623;color:#000;font-size:16px;font-weight:bold;padding:4px 12px;border-radius:4px;');
+                            this.log.warn('SANDBOX MODE detected');
                             resolve('sandbox');
                         }
                         else {
@@ -2271,7 +2569,7 @@ var CdvPurchase;
                             resolve('production');
                         }
                     }, () => {
-                        console.warn('⚠️ DeviceMeta.getDeviceMeta failed — defaulting to production');
+                        this.log.warn('DeviceMeta.getDeviceMeta failed — defaulting to production');
                         this.environment = 'production';
                         resolve('production');
                     });
@@ -2292,7 +2590,6 @@ else {
 /** @private */
 function initCDVPurchase() {
     var _a;
-    console.log('Create CdvPurchase...');
     const oldStore = (_a = window.CdvPurchase) === null || _a === void 0 ? void 0 : _a.store;
     window.CdvPurchase = CdvPurchase;
     if (oldStore) {
@@ -3916,25 +4213,12 @@ var CdvPurchase;
                  * Retrieves localized product data, including price (as localized
                  * string), name, description of multiple products.
                  *
-                 * @param {Array} productIds
-                 *   An array of product identifier strings.
-                 *
-                 * @param {Function} callback
-                 *   Called once with the result of the products request. Signature:
-                 *
-                 *     function(validProducts, invalidProductIds)
-                 *
-                 *   where validProducts receives an array of objects of the form:
-                 *
-                 *     {
-                 *       id: "<productId>",
-                 *       title: "<localised title>",
-                 *       description: "<localised escription>",
-                 *       price: "<localised price>"
-                 *     }
-                 *
-                 *  and invalidProductIds receives an array of product identifier
-                 *  strings which were rejected by the app store.
+                 * @param productIds - An array of product identifier strings.
+                 * @param success - Called once with the result of the products request.
+                 *   Receives `(validProducts, invalidProductIds)` where validProducts
+                 *   is an array of {@link ValidProduct} objects and invalidProductIds
+                 *   is an array of product identifier strings rejected by the store.
+                 * @param error - Called when loading fails.
                  */
                 load(productIds, success, error) {
                     const options = this.options;
@@ -5993,7 +6277,7 @@ var CdvPurchase;
             function extendAdditionalData(ad) {
                 const additionalData = ensureObject(ad === null || ad === void 0 ? void 0 : ad.googlePlay);
                 if (!additionalData.accountId && (ad === null || ad === void 0 ? void 0 : ad.applicationUsername)) {
-                    additionalData.accountId = CdvPurchase.Utils.md5(ad.applicationUsername);
+                    additionalData.accountId = ad.applicationUsername;
                 }
                 return additionalData;
             }

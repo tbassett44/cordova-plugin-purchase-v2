@@ -13,9 +13,11 @@ Entry class of the plugin.
 ### Properties
 
 - [applicationUsername](CdvPurchase.Store.md#applicationusername)
+- [currentEntitlement](CdvPurchase.Store.md#currententitlement)
 - [environment](CdvPurchase.Store.md#environment)
 - [log](CdvPurchase.Store.md#log)
 - [minTimeBetweenUpdates](CdvPurchase.Store.md#mintimebetweenupdates)
+- [restoreUrl](CdvPurchase.Store.md#restoreurl)
 - [validator](CdvPurchase.Store.md#validator)
 - [validator\_privacy\_policy](CdvPurchase.Store.md#validator_privacy_policy)
 - [verbosity](CdvPurchase.Store.md#verbosity)
@@ -40,6 +42,7 @@ Entry class of the plugin.
 - [get](CdvPurchase.Store.md#get)
 - [getAdapter](CdvPurchase.Store.md#getadapter)
 - [getApplicationUsername](CdvPurchase.Store.md#getapplicationusername)
+- [getCurrentEntitlements](CdvPurchase.Store.md#getcurrententitlements)
 - [getEnvironment](CdvPurchase.Store.md#getenvironment)
 - [initialize](CdvPurchase.Store.md#initialize)
 - [manageBilling](CdvPurchase.Store.md#managebilling)
@@ -52,6 +55,7 @@ Entry class of the plugin.
 - [refresh](CdvPurchase.Store.md#refresh)
 - [register](CdvPurchase.Store.md#register)
 - [requestPayment](CdvPurchase.Store.md#requestpayment)
+- [restoreAndSync](CdvPurchase.Store.md#restoreandsync)
 - [restorePurchases](CdvPurchase.Store.md#restorepurchases)
 - [update](CdvPurchase.Store.md#update)
 - [when](CdvPurchase.Store.md#when)
@@ -80,6 +84,18 @@ the transaction data.
 
 ___
 
+### currentEntitlement
+
+• **currentEntitlement**: ``null`` \| ``false`` \| \{ `expirationDate?`: `number` ; `platform`: `string` ; `productId`: `string` ; `purchaseDate?`: `number` ; `transactionId?`: `string`  } = `null`
+
+The currently active entitlement, resolved automatically during initialize().
+
+- `null` before initialization completes.
+- `false` if no active entitlement was found.
+- An entitlement object if an active (non-expired) entitlement exists.
+
+___
+
 ### environment
 
 • **environment**: ``"production"`` \| ``"sandbox"`` = `'production'`
@@ -103,6 +119,19 @@ ___
 • **minTimeBetweenUpdates**: `number` = `600000`
 
 Avoid invoking store.update() if the most recent call occurred within this specific number of milliseconds.
+
+___
+
+### restoreUrl
+
+• **restoreUrl**: `undefined` \| `string`
+
+URL for the server-side restore endpoint.
+
+Automatically set from platform options during `initialize()` based on
+the detected environment (production/sandbox) and platform (apple/google).
+
+Used by [Store.restoreAndSync](CdvPurchase.Store.md#restoreandsync).
 
 ___
 
@@ -424,6 +453,33 @@ Get the application username as a string by either calling or returning [Store.a
 
 ___
 
+### getCurrentEntitlements
+
+▸ **getCurrentEntitlements**(`success`, `error?`): `void`
+
+Unified entitlement check that works across iOS and Android.
+
+- **iOS:** Calls the native `getCurrentEntitlements` bridge method
+  (StoreKit 2 `Transaction.currentEntitlements`) — no sign-in prompt.
+- **Android:** Reads `localReceipts` (populated by `getPurchases()` during
+  `initialize()`) and filters for active, non-consumed, non-pending transactions.
+
+Returns a normalized array of entitlement objects to the success callback:
+`{ productId, expirationDate?, transactionId?, purchaseDate?, platform }`
+
+#### Parameters
+
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `success` | (`entitlements`: \{ `expirationDate?`: `number` ; `platform`: `string` ; `productId`: `string` ; `purchaseDate?`: `number` ; `transactionId?`: `string`  }[]) => `void` | Called with an array of active entitlements. |
+| `error?` | (`msg`: `string`) => `void` | Called if the underlying platform call fails. |
+
+#### Returns
+
+`void`
+
+___
+
 ### getEnvironment
 
 ▸ **getEnvironment**(): `Promise`\<``"production"`` \| ``"sandbox"``\>
@@ -717,6 +773,41 @@ supports Payment Requests.
 #### Returns
 
 [`PaymentRequestPromise`](CdvPurchase.PaymentRequestPromise.md)
+
+___
+
+### restoreAndSync
+
+▸ **restoreAndSync**(`options`): `Promise`\<`void`\>
+
+Restore purchases from the native store and sync them with your server.
+
+This method handles the full restore flow:
+1. Calls the native `restorePurchases()` to refresh transaction state.
+2. Collects transactions (iOS: JWS tokens from bridge, Android: purchase tokens from receipts).
+3. POSTs them to your server's restore endpoint via `fetch()`.
+4. Calls `store.update()` on success to refresh product state.
+
+Callbacks allow framework-agnostic event handling (UI updates, toasts, etc.).
+
+The restore URL is read from `store.restoreUrl`, which is automatically
+set during `initialize()` from platform options (e.g. `options.production.apple.restore`).
+
+#### Parameters
+
+| Name | Type | Description |
+| :------ | :------ | :------ |
+| `options` | `Object` | - |
+| `options.headers?` | `Record`\<`string`, `string`\> | Optional extra headers for the fetch request. |
+| `options.onError?` | (`error`: `string`) => `void` | Called with an error message string on failure. |
+| `options.onNoTransactions?` | () => `void` | Called when native restore found no transactions. |
+| `options.onStart?` | () => `void` | Called when the restore process begins. |
+| `options.onSuccess?` | (`result`: \{ `[key: string]`: `any`; `ok`: `boolean` ; `restored`: `number`  }) => `void` | Called with the server response on success. |
+| `options.userId` | `string` | The current user's ID. |
+
+#### Returns
+
+`Promise`\<`void`\>
 
 ___
 

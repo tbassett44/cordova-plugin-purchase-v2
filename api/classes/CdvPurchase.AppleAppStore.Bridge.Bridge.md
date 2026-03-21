@@ -253,8 +253,8 @@ string), name, description of multiple products.
 | Name | Type | Description |
 | :------ | :------ | :------ |
 | `productIds` | `string`[] | An array of product identifier strings. |
-| `success` | (`validProducts`: [`ValidProduct`](../interfaces/CdvPurchase.AppleAppStore.Bridge.ValidProduct.md)[], `invalidProductIds`: `string`[]) => `void` | - |
-| `error` | (`code`: [`ErrorCode`](../enums/CdvPurchase.ErrorCode.md), `message`: `string`) => `void` | - |
+| `success` | (`validProducts`: [`ValidProduct`](../interfaces/CdvPurchase.AppleAppStore.Bridge.ValidProduct.md)[], `invalidProductIds`: `string`[]) => `void` | Called once with the result of the products request. Receives `(validProducts, invalidProductIds)` where validProducts is an array of [ValidProduct](../interfaces/CdvPurchase.AppleAppStore.Bridge.ValidProduct.md) objects and invalidProductIds is an array of product identifier strings rejected by the store. |
+| `error` | (`code`: [`ErrorCode`](../enums/CdvPurchase.ErrorCode.md), `message`: `string`) => `void` | Called when loading fails. |
 
 #### Returns
 

@@ -59,7 +59,8 @@ namespace CdvPurchase {
             /**
              * Obfuscated user account identifier
              *
-             * Default to md5(store.applicationUsername)
+             * Default to store.applicationUsername (the UUID from userIdToUUID).
+             * Passed as-is to Google's setObfuscatedAccountId (max 64 chars).
              */
             accountId?: string;
 
@@ -361,7 +362,7 @@ namespace CdvPurchase {
             function extendAdditionalData(ad?: CdvPurchase.AdditionalData): AdditionalData {
                 const additionalData: AdditionalData = ensureObject(ad?.googlePlay);
                 if (!additionalData.accountId && ad?.applicationUsername) {
-                    additionalData.accountId = Utils.md5(ad.applicationUsername);
+                    additionalData.accountId = ad.applicationUsername;
                 }
                 return additionalData;
             }

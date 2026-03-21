@@ -461,25 +461,12 @@ namespace CdvPurchase {
                  * Retrieves localized product data, including price (as localized
                  * string), name, description of multiple products.
                  *
-                 * @param {Array} productIds
-                 *   An array of product identifier strings.
-                 *
-                 * @param {Function} callback
-                 *   Called once with the result of the products request. Signature:
-                 *
-                 *     function(validProducts, invalidProductIds)
-                 *
-                 *   where validProducts receives an array of objects of the form:
-                 *
-                 *     {
-                 *       id: "<productId>",
-                 *       title: "<localised title>",
-                 *       description: "<localised escription>",
-                 *       price: "<localised price>"
-                 *     }
-                 *
-                 *  and invalidProductIds receives an array of product identifier
-                 *  strings which were rejected by the app store.
+                 * @param productIds - An array of product identifier strings.
+                 * @param success - Called once with the result of the products request.
+                 *   Receives `(validProducts, invalidProductIds)` where validProducts
+                 *   is an array of {@link ValidProduct} objects and invalidProductIds
+                 *   is an array of product identifier strings rejected by the store.
+                 * @param error - Called when loading fails.
                  */
                 load(productIds: string[], success: (validProducts: ValidProduct[], invalidProductIds: string[]) => void, error: (code: ErrorCode, message: string) => void) {
                     const options = this.options;

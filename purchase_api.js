@@ -1636,22 +1636,26 @@ var iap={
             const productId = purchaseV2?.lineItems?.[0]?.productId || sub.subscriptionId || "unknown";
 
             /**
-             * Join key: you need a mapping from Google purchaseToken (or obfuscatedExternalAccountId)
-             * to your userId.
-             *
-             * In many setups:
-             * - you send obfuscatedExternalAccountId / profileId from client purchase params,
-             *   then it shows up in responses so you can map to your user.
-             *
-             * For this minimal example, accept ?userId=... as stand-in.
+             * Resolve userId from obfuscatedExternalAccountId.
+             * The client passes Store.userIdToUUID(userId) as the accountId,
+             * which Google returns here as obfuscatedExternalAccountId.
+             * We reverse it with uuidToUserId() — same pattern as Apple's appAccountToken.
+             * Falls back to ?userId= query param if obfuscatedExternalAccountId is not present.
              */
-            const userId = req.query.userId;
+            const obfuscatedId = purchaseV2?.obfuscatedExternalAccountId;
+            const decodedUserId = obfuscatedId ? iap.uuidToUserId(obfuscatedId) : null;
+            const userId = decodedUserId || req.query.userId;
+
+            tools.log(`[IAP:WEBHOOK:GOOGLE] obfuscatedExternalAccountId: ${obfuscatedId || '(not set)'}`);
+            tools.log(`[IAP:WEBHOOK:GOOGLE] decoded userId: ${decodedUserId || '(none)'}`);
+            tools.log(`[IAP:WEBHOOK:GOOGLE] final userId: ${userId || '(not found)'}`);
+
             if (!userId) {
-            console.warn("Google webhook received but no userId join key supplied.", {
+            console.warn("[IAP:WEBHOOK:GOOGLE] No userId found - entitlement NOT saved", {
                 productId,
                 status,
             });
-            return res.json({ ok: true, note: "No userId provided; not stored." });
+            return res.json({ ok: true, note: "No userId found; not stored." });
             }
 
             await iap.upsertEntitlement(String(userId), {
@@ -1662,7 +1666,7 @@ var iap={
                 raw: { rtdn: payload, purchaseV2 },
             });
 
-            tools.log(`[IAP:WEBHOOK:GOOGLE] ✅ Entitlement saved to database: userId=${userId}, status=${status}, productId=${productId}`);
+            tools.log(`[IAP:WEBHOOK:GOOGLE] ✅ Entitlement saved: userId=${userId}, status=${status}, productId=${productId}`);
             res.json({ ok: true });
         } catch (e) {
             console.error("Google webhook error", e);

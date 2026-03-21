@@ -83,7 +83,7 @@ namespace CdvPurchase
          * This method is mostly used when executing user registered callbacks.
          *
          * @param context - a string describing why the method was called
-         * @param error - a javascript Error object thrown by an exception
+         * @param err - a javascript Error object thrown by an exception
          */
         logCallbackException(context: string, err: Error | string) {
             this.warn("A callback in \'" + context + "\' failed with an exception.");
