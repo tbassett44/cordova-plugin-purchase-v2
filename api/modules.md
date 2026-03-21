@@ -1,4 +1,4 @@
-# cordova-plugin-purchase
+# cordova-plugin-purchase-v2
 
 ## Table of contents
 

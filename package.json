@@ -1,6 +1,6 @@
 {
   "name": "cordova-plugin-purchase-v2",
-  "version": "1.1.1",
+  "version": "3.3.3",
   "description": "Cordova Purchase plugin for iOS, Android, Windows (AppStore, Play, UWP)",
   "cordova": {
     "id": "cordova-plugin-purchase-v2",
