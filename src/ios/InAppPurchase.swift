@@ -1024,6 +1024,48 @@ public class InAppPurchase: CDVPlugin {
         return buildReceiptArgs(base64Receipt: base64)
     }
 
+    @objc func manageSubscriptions(_ command: CDVInvokedUrlCommand) {
+        log("manageSubscriptions: Opening subscription management...")
+        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+            #if os(iOS)
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            #else
+            NSWorkspace.shared.open(url)
+            #endif
+        }
+        let result = CDVPluginResult(status: .ok, messageAs: "manageSubscriptions")
+        commandDelegate.send(result, callbackId: command.callbackId)
+    }
+
+    @objc func manageBilling(_ command: CDVInvokedUrlCommand) {
+        log("manageBilling: Opening billing management...")
+        if let url = URL(string: "https://apps.apple.com/account/billing") {
+            #if os(iOS)
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            #else
+            NSWorkspace.shared.open(url)
+            #endif
+        }
+        let result = CDVPluginResult(status: .ok, messageAs: "manageBilling")
+        commandDelegate.send(result, callbackId: command.callbackId)
+    }
+
+    /// Returns true if the app receipt URL ends with "sandboxReceipt",
+    /// which is the case for both Xcode debug builds AND TestFlight installs.
+    /// This is the most reliable client-side check for sandbox IAP environment.
+    @objc func isSandbox(_ command: CDVInvokedUrlCommand) {
+        let isSandbox: Bool
+        if let receiptURL = Bundle.main.appStoreReceiptURL {
+            isSandbox = receiptURL.lastPathComponent == "sandboxReceipt"
+            log("isSandbox: receiptURL=\(receiptURL.path) lastPathComponent=\(receiptURL.lastPathComponent) → \(isSandbox)")
+        } else {
+            isSandbox = false
+            log("isSandbox: no appStoreReceiptURL — defaulting to false (production)")
+        }
+        let result = CDVPluginResult(status: .ok, messageAs: isSandbox)
+        commandDelegate.send(result, callbackId: command.callbackId)
+    }
+
     @objc func appStoreReceipt(_ command: CDVInvokedUrlCommand) {
         log("appStoreReceipt: Reading app store receipt...")
 

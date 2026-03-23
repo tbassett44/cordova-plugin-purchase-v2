@@ -2531,11 +2531,13 @@ var CdvPurchase;
             }
         }
         /**
-         * Detect whether the app is running in a sandbox (iOS debug) or production environment.
+         * Detect whether the app is running in a sandbox or production environment.
          *
-         * - Android always returns 'production' (no sandbox concept at this layer).
-         * - iOS uses cordova.plugins.DeviceMeta; if the build is a debug build, returns 'sandbox'.
-         * - If DeviceMeta is unavailable, defaults to 'production' and logs a warning.
+         * - Android always returns 'production' (Google Play handles sandbox internally).
+         * - iOS calls the native InAppPurchase.isSandbox method which checks
+         *   Bundle.main.appStoreReceiptURL — if the receipt path ends with
+         *   "sandboxReceipt", the app is running in sandbox (Xcode debug OR TestFlight).
+         * - If cordova.exec is unavailable, defaults to 'production'.
          *
          * The result is cached — subsequent calls return the same promise.
          */
@@ -2544,10 +2546,9 @@ var CdvPurchase;
                 if (this._environmentPromise)
                     return this._environmentPromise;
                 this._environmentPromise = new Promise((resolve) => {
-                    var _a, _b;
                     const cordova = window.cordova;
-                    if (!((_b = (_a = cordova === null || cordova === void 0 ? void 0 : cordova.plugins) === null || _a === void 0 ? void 0 : _a.DeviceMeta) === null || _b === void 0 ? void 0 : _b.getDeviceMeta)) {
-                        this.log.warn('cordova.plugins.DeviceMeta not available — defaulting to production');
+                    if (!(cordova === null || cordova === void 0 ? void 0 : cordova.exec)) {
+                        this.log.warn('cordova.exec not available — defaulting to production');
                         this.environment = 'production';
                         return resolve('production');
                     }
@@ -2557,22 +2558,23 @@ var CdvPurchase;
                         this.environment = 'production';
                         return resolve('production');
                     }
-                    this.log.info('iOS device — checking sandbox mode via DeviceMeta…');
-                    cordova.plugins.DeviceMeta.getDeviceMeta((deviceInfo) => {
-                        if (deviceInfo === null || deviceInfo === void 0 ? void 0 : deviceInfo.debug) {
+                    this.log.info('iOS device — checking sandbox via receipt URL…');
+                    cordova.exec((isSandbox) => {
+                        if (isSandbox) {
                             this.environment = 'sandbox';
-                            this.log.warn('SANDBOX MODE detected');
+                            this.log.warn('SANDBOX MODE detected (sandboxReceipt)');
                             resolve('sandbox');
                         }
                         else {
                             this.environment = 'production';
+                            this.log.info('Production environment (App Store receipt)');
                             resolve('production');
                         }
                     }, () => {
-                        this.log.warn('DeviceMeta.getDeviceMeta failed — defaulting to production');
+                        this.log.warn('InAppPurchase.isSandbox failed — defaulting to production');
                         this.environment = 'production';
                         resolve('production');
-                    });
+                    }, 'InAppPurchase', 'isSandbox', []);
                 });
                 return this._environmentPromise;
             });

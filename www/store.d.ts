@@ -1326,11 +1326,13 @@ declare namespace CdvPurchase {
          */
         private _applyEnvironmentConfig;
         /**
-         * Detect whether the app is running in a sandbox (iOS debug) or production environment.
+         * Detect whether the app is running in a sandbox or production environment.
          *
-         * - Android always returns 'production' (no sandbox concept at this layer).
-         * - iOS uses cordova.plugins.DeviceMeta; if the build is a debug build, returns 'sandbox'.
-         * - If DeviceMeta is unavailable, defaults to 'production' and logs a warning.
+         * - Android always returns 'production' (Google Play handles sandbox internally).
+         * - iOS calls the native InAppPurchase.isSandbox method which checks
+         *   Bundle.main.appStoreReceiptURL — if the receipt path ends with
+         *   "sandboxReceipt", the app is running in sandbox (Xcode debug OR TestFlight).
+         * - If cordova.exec is unavailable, defaults to 'production'.
          *
          * The result is cached — subsequent calls return the same promise.
          */
