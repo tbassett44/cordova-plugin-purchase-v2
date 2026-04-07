@@ -199,7 +199,7 @@ namespace CdvPurchase {
                 finished: (transactionIdentifier: string, productId: string) => void;
 
                 /** Called when a transaction is in "restored" state */
-                restored: (transactionIdentifier: string, productId: string) => void;
+                restored: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string, jwsRepresentation?: string) => void;
 
                 /** Called when the application receipt is refreshed */
                 receiptsRefreshed: (receipt: ApplicationReceipt) => void;
@@ -571,7 +571,7 @@ namespace CdvPurchase {
                             protectCall(this.options.error, 'options.error', errorCode || ErrorCode.UNKNOWN, errorText || 'ERROR', {productId});
                             return;
                         case "PaymentTransactionStateRestored":
-                            protectCall(this.options.restored, 'options.restore', transactionIdentifier, productId);
+                            protectCall(this.options.restored, 'options.restore', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation);
                             return;
                         case "PaymentTransactionStateFinished":
                             protectCall(this.options.finished, 'options.finish', transactionIdentifier, productId);

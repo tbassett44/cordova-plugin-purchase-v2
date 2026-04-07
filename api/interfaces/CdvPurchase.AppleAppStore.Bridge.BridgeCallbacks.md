@@ -301,13 +301,13 @@ ___
 
 ### restored
 
-• **restored**: (`transactionIdentifier`: `string`, `productId`: `string`) => `void`
+• **restored**: (`transactionIdentifier`: `string`, `productId`: `string`, `originalTransactionIdentifier?`: `string`, `transactionDate?`: `string`, `discountId?`: `string`, `expirationDate?`: `string`, `jwsRepresentation?`: `string`) => `void`
 
 Called when a transaction is in "restored" state
 
 #### Type declaration
 
-▸ (`transactionIdentifier`, `productId`): `void`
+▸ (`transactionIdentifier`, `productId`, `originalTransactionIdentifier?`, `transactionDate?`, `discountId?`, `expirationDate?`, `jwsRepresentation?`): `void`
 
 ##### Parameters
 
@@ -315,6 +315,11 @@ Called when a transaction is in "restored" state
 | :------ | :------ |
 | `transactionIdentifier` | `string` |
 | `productId` | `string` |
+| `originalTransactionIdentifier?` | `string` |
+| `transactionDate?` | `string` |
+| `discountId?` | `string` |
+| `expirationDate?` | `string` |
+| `jwsRepresentation?` | `string` |
 
 ##### Returns
 

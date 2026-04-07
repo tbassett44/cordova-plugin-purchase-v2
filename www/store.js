@@ -1497,7 +1497,7 @@ var CdvPurchase;
     /**
      * Current release number of the plugin.
      */
-    CdvPurchase.PLUGIN_VERSION = '13.13.1';
+    CdvPurchase.PLUGIN_VERSION = '3.3.3';
     /**
      * Entry class of the plugin.
      */
@@ -3504,9 +3504,10 @@ var CdvPurchase;
                             yield this.upsertTransaction(productId, transactionIdentifier, CdvPurchase.TransactionState.FINISHED);
                             this.receiptsUpdated.call();
                         }),
-                        restored: (transactionIdentifier, productId) => __awaiter(this, void 0, void 0, function* () {
-                            this.log.info('restore: ' + transactionIdentifier + ' - ' + productId);
-                            yield this.upsertTransaction(productId, transactionIdentifier, CdvPurchase.TransactionState.APPROVED);
+                        restored: (transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation) => __awaiter(this, void 0, void 0, function* () {
+                            this.log.info('restore: id:' + transactionIdentifier + ' product:' + productId + ' originalTransaction:' + originalTransactionIdentifier + ' - date:' + transactionDate + ' - discount:' + discountId + ' - expires:' + expirationDate + ' - hasJWS:' + !!jwsRepresentation);
+                            const transaction = yield this.upsertTransaction(productId, transactionIdentifier, CdvPurchase.TransactionState.APPROVED);
+                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation);
                             this.receiptsUpdated.call();
                         }),
                         receiptsRefreshed: (receipt) => {
@@ -3756,7 +3757,23 @@ var CdvPurchase;
                 });
             }
             order(offer, additionalData) {
+                var _a;
                 return __awaiter(this, void 0, void 0, function* () {
+                    // Flush stale APPROVED transactions before placing a new order.
+                    // If a previous purchase flow was interrupted (app closed, sheet
+                    // dismissed while native was still processing), the receipt may
+                    // contain APPROVED transactions that were never verified/finished.
+                    // These cause the approved callback to fire immediately instead of
+                    // showing the native payment sheet for the new product.
+                    if (this._receipt) {
+                        const stale = this._receipt.transactions.filter(t => t.state === CdvPurchase.TransactionState.APPROVED
+                            && t.transactionId !== AppleAppStore.APPLICATION_VIRTUAL_TRANSACTION_ID);
+                        for (const t of stale) {
+                            this.log.info('order: finishing stale approved transaction '
+                                + t.transactionId + ' product:' + ((_a = t.products[0]) === null || _a === void 0 ? void 0 : _a.id));
+                            yield this.finish(t);
+                        }
+                    }
                     let resolved = false;
                     return new Promise(resolve => {
                         var _a;
@@ -3867,6 +3884,7 @@ var CdvPurchase;
                 });
             }
             receiptValidationBody(receipt) {
+                var _a, _b, _c, _d;
                 return __awaiter(this, void 0, void 0, function* () {
                     if (receipt.platform !== CdvPurchase.Platform.APPLE_APPSTORE)
                         return;
@@ -3874,11 +3892,24 @@ var CdvPurchase;
                         return; // do not validate the pseudo receipt
                     const skReceipt = receipt;
                     let applicationReceipt = skReceipt.nativeData;
-                    // Get the latest transaction (which may have a JWS token from StoreKit 2)
-                    const transaction = skReceipt.transactions.slice(-1)[0];
+                    // Log transaction state for debugging
+                    const allTransactions = skReceipt.transactions;
+                    const withJws = allTransactions.filter(t => t.jwsRepresentation);
+                    this.log.info('receiptValidationBody: ' + allTransactions.length + ' transaction(s), ' + withJws.length + ' with JWS');
+                    allTransactions.forEach((t, i) => {
+                        var _a, _b;
+                        this.log.info('receiptValidationBody: tx[' + i + '] id=' + t.transactionId
+                            + ' state=' + t.state
+                            + ' product=' + ((_b = (_a = t.products[0]) === null || _a === void 0 ? void 0 : _a.id) !== null && _b !== void 0 ? _b : 'none')
+                            + ' hasJWS=' + !!t.jwsRepresentation);
+                    });
+                    // Get the latest transaction that has a JWS token (StoreKit 2).
+                    // Filter first so that finished/restored transactions without JWS
+                    // don't shadow the real purchase transaction at the end of the array.
+                    const transaction = withJws.slice(-1)[0];
                     // StoreKit 2: If we have a JWS token, use it directly (no need for legacy appStoreReceipt)
                     if (transaction === null || transaction === void 0 ? void 0 : transaction.jwsRepresentation) {
-                        this.log.info('Using StoreKit 2 JWS token for validation');
+                        this.log.info('receiptValidationBody: ✅ Using StoreKit 2 JWS path — tx=' + transaction.transactionId + ' product=' + ((_b = (_a = transaction.products[0]) === null || _a === void 0 ? void 0 : _a.id) !== null && _b !== void 0 ? _b : 'none'));
                         return {
                             id: applicationReceipt.bundleIdentifier,
                             type: CdvPurchase.ProductType.APPLICATION,
@@ -3892,7 +3923,9 @@ var CdvPurchase;
                         };
                     }
                     // StoreKit 1 fallback: Try to load the legacy appStoreReceipt
+                    this.log.warn('receiptValidationBody: ⚠️ No transaction with JWS found — falling through to StoreKit 1 fallback');
                     if (this.forceReceiptReload) {
+                        this.log.info('receiptValidationBody: forceReceiptReload=true — reloading appStoreReceipt');
                         const nativeData = yield this.loadAppStoreReceipt();
                         this.forceReceiptReload = false;
                         if (nativeData) {
@@ -3901,17 +3934,18 @@ var CdvPurchase;
                         }
                     }
                     if (!skReceipt.nativeData.appStoreReceipt) {
-                        this.log.info('Cannot prepare the receipt validation body, because appStoreReceipt is missing. Refreshing...');
+                        this.log.info('receiptValidationBody: appStoreReceipt is missing — refreshing...');
                         const result = yield this.refreshReceipt();
                         if (!result || 'isError' in result) {
-                            this.log.warn('Failed to refresh receipt, cannot run receipt validation.');
+                            this.log.warn('receiptValidationBody: Failed to refresh receipt, cannot run receipt validation.');
                             if (result)
                                 this.log.error(result);
                             return;
                         }
-                        this.log.info('Receipt refreshed.');
+                        this.log.info('receiptValidationBody: Receipt refreshed.');
                         applicationReceipt = result;
                     }
+                    this.log.info('receiptValidationBody: returning StoreKit 1 body, appStoreReceipt length=' + ((_d = (_c = applicationReceipt.appStoreReceipt) === null || _c === void 0 ? void 0 : _c.length) !== null && _d !== void 0 ? _d : 0));
                     return {
                         id: applicationReceipt.bundleIdentifier,
                         type: CdvPurchase.ProductType.APPLICATION,
@@ -4316,7 +4350,7 @@ var CdvPurchase;
                             protectCall(this.options.error, 'options.error', errorCode || CdvPurchase.ErrorCode.UNKNOWN, errorText || 'ERROR', { productId });
                             return;
                         case "PaymentTransactionStateRestored":
-                            protectCall(this.options.restored, 'options.restore', transactionIdentifier, productId);
+                            protectCall(this.options.restored, 'options.restore', transactionIdentifier, productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation);
                             return;
                         case "PaymentTransactionStateFinished":
                             protectCall(this.options.finished, 'options.finish', transactionIdentifier, productId);

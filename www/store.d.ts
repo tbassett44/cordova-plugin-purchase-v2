@@ -817,7 +817,7 @@ declare namespace CdvPurchase {
     /**
      * Current release number of the plugin.
      */
-    const PLUGIN_VERSION = "13.13.1";
+    const PLUGIN_VERSION = "3.3.3";
     /**
      * Entry class of the plugin.
      */
@@ -2911,7 +2911,7 @@ declare namespace CdvPurchase {
                 /** Called when a transaction is in "finished" state */
                 finished: (transactionIdentifier: string, productId: string) => void;
                 /** Called when a transaction is in "restored" state */
-                restored: (transactionIdentifier: string, productId: string) => void;
+                restored: (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string, jwsRepresentation?: string) => void;
                 /** Called when the application receipt is refreshed */
                 receiptsRefreshed: (receipt: ApplicationReceipt) => void;
                 /** Called when a call to "restore" failed */

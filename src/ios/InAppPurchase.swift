@@ -45,6 +45,22 @@ public class InAppPurchase: CDVPlugin {
     private var debugEnabled = false
     private var autoFinishEnabled = false
 
+    /// Returns true if the transaction's environment matches what we expect.
+    /// On iOS 16+ we check `transaction.environment`; on older versions we allow all.
+    /// TestFlight and Xcode Debug builds have "sandboxReceipt"; App Store builds do not.
+    private func isMatchingEnvironment(_ transaction: Transaction) -> Bool {
+        if #available(iOS 16.0, macOS 13.0, *) {
+            let isSandboxBuild = Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
+            let expected: AppStore.Environment = isSandboxBuild ? .sandbox : .production
+            let matches = transaction.environment == expected
+            if !matches {
+                log("🌍 environment filter: SKIPPING tx \(transaction.id) for \(transaction.productID) — tx.environment=\(transaction.environment) expected=\(expected)")
+            }
+            return matches
+        }
+        return true // pre-iOS 16: no environment property, allow all
+    }
+
     /// Set while a purchase() call is in flight. The transaction observer uses this to suppress
     /// background auto-renewals for other products (e.g. pro_monthly_1 renewing while the user
     /// is purchasing pro_monthly_2) so they never reach the JS approved callback.
@@ -245,6 +261,9 @@ public class InAppPurchase: CDVPlugin {
         // Source 1: Transaction.currentEntitlements (primary, fast, local)
         for await result in Transaction.currentEntitlements {
             if let transaction = try? checkVerified(result) {
+                // Environment filter: skip transactions from the wrong environment
+                // (e.g. production subscriptions showing up in TestFlight/sandbox)
+                guard isMatchingEnvironment(transaction) else { continue }
                 guard !seenTransactionIds.contains(transaction.id) else {
                     log("fetchLiveEntitlements: skipping duplicate tx \(transaction.id) for \(transaction.productID)")
                     continue
@@ -303,6 +322,7 @@ public class InAppPurchase: CDVPlugin {
                         // underlying transaction — we must not create phantom entitlements for tiers
                         // the user never purchased.
                         guard let tx = try? status.transaction.payloadValue,
+                              isMatchingEnvironment(tx),
                               tx.productID == productId,
                               !seenTransactionIds.contains(tx.id) else {
                             if let tx = try? status.transaction.payloadValue {
@@ -361,87 +381,95 @@ public class InAppPurchase: CDVPlugin {
                     case failure(message: String)
                 }
 
-                func processPurchaseResult(_ result: Product.PurchaseResult, allowRetryAfterStaleExpiredTransaction: Bool) async throws -> PurchaseCommandCallbackResult {
-                    switch result {
-                    case .success(let verification):
-                        let transaction = try self.checkVerified(verification)
-                        let jwsRepresentation = verification.jwsRepresentation
+	                let maxSilentExpiredTransactionRetries = 2
+	                let silentExpiredTransactionRetryDelayNanoseconds: UInt64 = 350_000_000
 
-                        let expiresStr = transaction.expirationDate?.description ?? "none"
-                        let purchaseStr = transaction.purchaseDate.description
-                        let isExpired = transaction.expirationDate.map { $0 < Date() } ?? false
-                        self.log("purchase: Success - id:\(transaction.id) product:\(transaction.productID)")
-                        self.log("purchase: Transaction details - purchaseDate:\(purchaseStr) expiresDate:\(expiresStr) isExpired:\(isExpired)")
+	                func processPurchaseResult(_ result: Product.PurchaseResult, remainingSilentExpiredTransactionRetries: Int) async throws -> PurchaseCommandCallbackResult {
+	                    switch result {
+	                    case .success(let verification):
+	                        let transaction = try self.checkVerified(verification)
+	                        let jwsRepresentation = verification.jwsRepresentation
 
-                        if self.shouldSilentlyFinishExpiredSubscriptionTransaction(transaction) {
-                            let transactionId = String(transaction.id)
-                            self.log("purchase: Detected stale expired transaction \(transactionId) returned from product.purchase()")
-                            await self.silentlyFinishTransaction(transaction, reason: "purchase returned an already-expired subscription transaction")
+	                        let expiresStr = transaction.expirationDate?.description ?? "none"
+	                        let purchaseStr = transaction.purchaseDate.description
+	                        let isExpired = transaction.expirationDate.map { $0 < Date() } ?? false
+	                        self.log("purchase: Success - id:\(transaction.id) product:\(transaction.productID)")
+	                        self.log("purchase: Transaction details - purchaseDate:\(purchaseStr) expiresDate:\(expiresStr) isExpired:\(isExpired)")
 
-                            if allowRetryAfterStaleExpiredTransaction {
-                                self.log("purchase: Retrying product.purchase() once after finishing stale transaction \(transactionId)")
-                                let retryResult = try await product.purchase(options: purchaseOptions)
-                                self.log("purchase: Retry product.purchase() returned")
-                                return try await processPurchaseResult(retryResult, allowRetryAfterStaleExpiredTransaction: false)
-                            } else {
-                                // Retry also returned an expired transaction (common in sandbox with
-                                // a backlog of short cycles). Before failing, check if there is already
-                                // an active entitlement for this product — if so, surface it as a
-                                // successful purchase rather than showing an error to the user.
-                                self.log("purchase: Retry also returned stale transaction \(transactionId); checking currentEntitlements for \(productId)")
-                                var foundActive = false
-                                for await entitlementResult in Transaction.currentEntitlements {
-                                    if let activeTx = try? self.checkVerified(entitlementResult),
-                                       activeTx.productID == productId {
-                                        self.log("purchase: Found active entitlement \(activeTx.id) via currentEntitlements — treating as success")
-                                        let activeJws = entitlementResult.jwsRepresentation
-                                        await self.handleVerifiedTransaction(activeTx, jwsRepresentation: activeJws, skipExpiredCheck: true)
-                                        foundActive = true
-                                        break
-                                    }
-                                }
-                                // Source 2: subscription.status — catches the sandbox gap where
-                                // currentEntitlements is briefly empty between a cycle expiry and
-                                // its renewal transaction landing. Status can show .subscribed even
-                                // when currentEntitlements returns nothing.
-                                if !foundActive, let subscription = product.subscription {
-                                    self.log("purchase: currentEntitlements empty; checking subscription.status for \(productId)")
-                                    if let statuses = try? await subscription.status {
-                                        for status in statuses {
-                                            self.log("purchase: subscription.status = \(status.state) for \(productId)")
-                                            if status.state == .subscribed || status.state == .inGracePeriod {
-                                                if let activeTx = try? self.checkVerified(status.transaction) {
-                                                    // Guard: in a subscription group, Apple may report .subscribed
-                                                    // for sibling products using a transaction that belongs to a
-                                                    // different tier. Only accept if the tx actually matches.
-                                                    guard activeTx.productID == productId else {
-                                                        self.log("purchase: subscription.status tx \(activeTx.id) belongs to \(activeTx.productID), not \(productId) — skipping")
-                                                        continue
-                                                    }
-                                                    self.log("purchase: subscription.status confirms active (\(status.state)) — using transaction \(activeTx.id)")
-                                                    let activeJws = status.transaction.jwsRepresentation
-                                                    await self.handleVerifiedTransaction(activeTx, jwsRepresentation: activeJws, skipExpiredCheck: true)
-                                                    foundActive = true
-                                                    break
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if !foundActive {
-                                    let errorMessage = "Store returned an expired transaction. Please try again."
-                                    self.log("purchase: No active entitlement found after retry + status check; giving up on \(transactionId)")
-                                    self.emitTransactionUpdate(
-                                        state: "PaymentTransactionStateFailed",
-                                        errorCode: ERR_PURCHASE,
-                                        error: errorMessage,
-                                        productId: productId
-                                    )
-                                    return .failure(message: errorMessage)
-                                }
-                                return .success(message: "Payment added to queue")
-                            }
-                        }
+	                        if self.shouldSilentlyFinishExpiredSubscriptionTransaction(transaction) {
+	                            let transactionId = String(transaction.id)
+	                            self.log("purchase: Detected stale expired transaction \(transactionId) returned from product.purchase()")
+	                            await self.silentlyFinishTransaction(transaction, reason: "purchase returned an already-expired subscription transaction")
+
+	                            if remainingSilentExpiredTransactionRetries > 0 {
+	                                let attemptNumber = maxSilentExpiredTransactionRetries - remainingSilentExpiredTransactionRetries + 1
+	                                self.log("purchase: Waiting \(silentExpiredTransactionRetryDelayNanoseconds / 1_000_000)ms before silent retry \(attemptNumber) for stale transaction \(transactionId) (remaining retries after this: \(remainingSilentExpiredTransactionRetries - 1))")
+	                                try await Task.sleep(nanoseconds: silentExpiredTransactionRetryDelayNanoseconds)
+	                                self.log("purchase: Retrying product.purchase() after finishing stale transaction \(transactionId)")
+	                                let retryResult = try await product.purchase(options: purchaseOptions)
+	                                self.log("purchase: Retry product.purchase() returned")
+	                                return try await processPurchaseResult(retryResult, remainingSilentExpiredTransactionRetries: remainingSilentExpiredTransactionRetries - 1)
+	                            } else {
+	                                // All silent retries still returned expired transactions (common in sandbox
+	                                // with a backlog of short cycles). Before failing, check if there is already
+	                                // an active entitlement for this product — if so, surface it as a
+	                                // successful purchase rather than showing an error to the user.
+	                                self.log("purchase: Silent retries exhausted for stale transaction \(transactionId); checking currentEntitlements for \(productId)")
+	                                var foundActive = false
+	                                for await entitlementResult in Transaction.currentEntitlements {
+	                                    if let activeTx = try? self.checkVerified(entitlementResult),
+	                                       self.isMatchingEnvironment(activeTx),
+	                                       activeTx.productID == productId {
+	                                        self.log("purchase: Found active entitlement \(activeTx.id) via currentEntitlements — treating as success")
+	                                        let activeJws = entitlementResult.jwsRepresentation
+	                                        await self.handleVerifiedTransaction(activeTx, jwsRepresentation: activeJws, skipExpiredCheck: true)
+	                                        foundActive = true
+	                                        break
+	                                    }
+	                                }
+	                                // Source 2: subscription.status — catches the sandbox gap where
+	                                // currentEntitlements is briefly empty between a cycle expiry and
+	                                // its renewal transaction landing. Status can show .subscribed even
+	                                // when currentEntitlements returns nothing.
+	                                if !foundActive, let subscription = product.subscription {
+	                                    self.log("purchase: currentEntitlements empty; checking subscription.status for \(productId)")
+	                                    if let statuses = try? await subscription.status {
+	                                        for status in statuses {
+	                                            self.log("purchase: subscription.status = \(status.state) for \(productId)")
+	                                            if status.state == .subscribed || status.state == .inGracePeriod {
+	                                                if let activeTx = try? self.checkVerified(status.transaction),
+	                                                   self.isMatchingEnvironment(activeTx) {
+	                                                    // Guard: in a subscription group, Apple may report .subscribed
+	                                                    // for sibling products using a transaction that belongs to a
+	                                                    // different tier. Only accept if the tx actually matches.
+	                                                    guard activeTx.productID == productId else {
+	                                                        self.log("purchase: subscription.status tx \(activeTx.id) belongs to \(activeTx.productID), not \(productId) — skipping")
+	                                                        continue
+	                                                    }
+	                                                    self.log("purchase: subscription.status confirms active (\(status.state)) — using transaction \(activeTx.id)")
+	                                                    let activeJws = status.transaction.jwsRepresentation
+	                                                    await self.handleVerifiedTransaction(activeTx, jwsRepresentation: activeJws, skipExpiredCheck: true)
+	                                                    foundActive = true
+	                                                    break
+	                                                }
+	                                            }
+	                                        }
+	                                    }
+	                                }
+	                                if !foundActive {
+	                                    let errorMessage = "Store returned an expired transaction. Please try again."
+	                                    self.log("purchase: No active entitlement found after silent retries + status check; giving up on \(transactionId)")
+	                                    self.emitTransactionUpdate(
+	                                        state: "PaymentTransactionStateFailed",
+	                                        errorCode: ERR_PURCHASE,
+	                                        error: errorMessage,
+	                                        productId: productId
+	                                    )
+	                                    return .failure(message: errorMessage)
+	                                }
+	                                return .success(message: "Payment added to queue")
+	                            }
+	                        }
 
                         // During subscription plan changes (upgrade or downgrade), Apple can
                         // return a transaction for the OLD product even though we called
@@ -456,6 +484,7 @@ public class InAppPurchase: CDVPlugin {
                             for attempt in 1...maxAttempts {
                                 for await entitlementResult in Transaction.currentEntitlements {
                                     if let targetTx = try? self.checkVerified(entitlementResult),
+                                       self.isMatchingEnvironment(targetTx),
                                        targetTx.productID == productId {
                                         self.log("purchase: Found target product \(productId) in currentEntitlements on attempt \(attempt) (tx:\(targetTx.id)) — using for verify")
                                         await self.handleVerifiedTransaction(targetTx, jwsRepresentation: entitlementResult.jwsRepresentation)
@@ -479,6 +508,7 @@ public class InAppPurchase: CDVPlugin {
                                     for status in statuses {
                                         if status.state == .subscribed || status.state == .inGracePeriod {
                                             if let targetTx = try? self.checkVerified(status.transaction),
+                                               self.isMatchingEnvironment(targetTx),
                                                targetTx.productID == productId {
                                                 self.log("purchase: Found target \(productId) via subscription.status (tx:\(targetTx.id)) — using for verify")
                                                 await self.handleVerifiedTransaction(targetTx, jwsRepresentation: status.transaction.jwsRepresentation)
@@ -580,7 +610,8 @@ public class InAppPurchase: CDVPlugin {
                    let keyId = discount["key"] as? String,
                    let nonceString = discount["nonce"] as? String,
                    let nonce = UUID(uuidString: nonceString),
-                   let signature = discount["signature"] as? Data,
+                   let signatureString = discount["signature"] as? String,
+                   let signature = Data(base64Encoded: signatureString),
                    let timestampNumber = discount["timestamp"] as? NSNumber {
                     let timestamp = timestampNumber.intValue
                     purchaseOptions.insert(.promotionalOffer(
@@ -592,28 +623,20 @@ public class InAppPurchase: CDVPlugin {
                     ))
                 }
 
-                // Gate on the JS-side canPurchase flag, which is derived from the most
-                // recent local receipt state. If JS says the product is already owned,
-                // block immediately without any additional StoreKit queries.
+                // Note: removed canPurchase gate — for subscriptions in the same group,
+                // Apple handles upgrades/downgrades/crossgrades natively via StoreKit 2.
+                // The JS-side LocalReceipts.canPurchase flag is too aggressive for subscription
+                // groups (it blocks re-purchasing a previously held tier).
                 if !canPurchase {
-                    self.log("purchase: JS canPurchase=false — product already owned; blocking purchase")
-                    self.emitTransactionUpdate(
-                        state: "PaymentTransactionStateFailed",
-                        errorCode: ERR_PURCHASE,
-                        error: "Already subscribed to this product",
-                        productId: productId
-                    )
-                    let pluginResult = CDVPluginResult(status: .error, messageAs: "Already subscribed")
-                    self.commandDelegate.send(pluginResult, callbackId: command.callbackId)
-                    return
+                    self.log("purchase: JS canPurchase=false — ignoring; letting StoreKit handle subscription group logic")
                 }
 
-                self.log("purchase: Calling product.purchase()...")
-                self.currentOrderingProductId = productId
-                let result = try await product.purchase(options: purchaseOptions)
-                self.log("purchase: product.purchase() returned")
-                let callbackResult = try await processPurchaseResult(result, allowRetryAfterStaleExpiredTransaction: true)
-                self.currentOrderingProductId = nil
+	                self.log("purchase: Calling product.purchase()...")
+	                self.currentOrderingProductId = productId
+	                let result = try await product.purchase(options: purchaseOptions)
+	                self.log("purchase: product.purchase() returned")
+	                let callbackResult = try await processPurchaseResult(result, remainingSilentExpiredTransactionRetries: maxSilentExpiredTransactionRetries)
+	                self.currentOrderingProductId = nil
 
                 let pluginResult: CDVPluginResult
                 switch callbackResult {
@@ -669,6 +692,9 @@ public class InAppPurchase: CDVPlugin {
             let transaction = try checkVerified(result)
             let jwsRepresentation = result.jwsRepresentation
             log("📦 handleTransactionUpdate: verified tx=\(transaction.id) product=\(transaction.productID) isUpgraded=\(transaction.isUpgraded) revoked=\(transaction.revocationDate != nil)")
+
+            // Environment filter: ignore transactions from the wrong environment
+            guard isMatchingEnvironment(transaction) else { return }
 
             // If a purchase is in flight for a specific product, suppress observer deliveries
             // for any other product. Background auto-renewals (e.g. pro_monthly_1 renewing
@@ -1011,18 +1037,6 @@ public class InAppPurchase: CDVPlugin {
         ]
     }
 
-    /// Try to read the legacy on-disk StoreKit 1 receipt and return the args array.
-    /// Returns nil if the receipt file doesn't exist.
-    private func loadLegacyReceiptArgs() -> [Any]? {
-        guard let receiptURL = Bundle.main.appStoreReceiptURL,
-              FileManager.default.fileExists(atPath: receiptURL.path),
-              let receiptData = try? Data(contentsOf: receiptURL) else {
-            return nil
-        }
-        let base64 = receiptData.base64EncodedString()
-        log("loadLegacyReceiptArgs: receipt read (\(base64.count) chars)")
-        return buildReceiptArgs(base64Receipt: base64)
-    }
 
     @objc func manageSubscriptions(_ command: CDVInvokedUrlCommand) {
         log("manageSubscriptions: Opening subscription management...")
@@ -1035,6 +1049,43 @@ public class InAppPurchase: CDVPlugin {
         }
         let result = CDVPluginResult(status: .ok, messageAs: "manageSubscriptions")
         commandDelegate.send(result, callbackId: command.callbackId)
+    }
+
+    @objc func presentCodeRedemptionSheet(_ command: CDVInvokedUrlCommand) {
+        log("presentCodeRedemptionSheet: Opening offer code redemption sheet...")
+        #if os(iOS)
+        if #available(iOS 16.0, *) {
+            // StoreKit 2: presentOfferCodeRedeemSheet
+            Task { @MainActor in
+                do {
+                    guard let windowScene = UIApplication.shared.connectedScenes
+                        .compactMap({ $0 as? UIWindowScene })
+                        .first(where: { $0.activationState == .foregroundActive }) else {
+                        self.log("presentCodeRedemptionSheet: No active window scene found")
+                        let result = CDVPluginResult(status: .error, messageAs: "No active window scene")
+                        self.commandDelegate.send(result, callbackId: command.callbackId)
+                        return
+                    }
+                    try await AppStore.presentOfferCodeRedeemSheet(in: windowScene)
+                    self.log("presentCodeRedemptionSheet: Sheet dismissed")
+                    let result = CDVPluginResult(status: .ok, messageAs: "presentCodeRedemptionSheet")
+                    self.commandDelegate.send(result, callbackId: command.callbackId)
+                } catch {
+                    self.log("presentCodeRedemptionSheet: Error — \(error.localizedDescription)")
+                    let result = CDVPluginResult(status: .error, messageAs: error.localizedDescription)
+                    self.commandDelegate.send(result, callbackId: command.callbackId)
+                }
+            }
+        } else {
+            // iOS 14-15 fallback: legacy SKPaymentQueue API
+            SKPaymentQueue.default().presentCodeRedemptionSheet()
+            let result = CDVPluginResult(status: .ok, messageAs: "presentCodeRedemptionSheet")
+            commandDelegate.send(result, callbackId: command.callbackId)
+        }
+        #else
+        let result = CDVPluginResult(status: .ok, messageAs: "presentCodeRedemptionSheet (not supported on this platform)")
+        commandDelegate.send(result, callbackId: command.callbackId)
+        #endif
     }
 
     @objc func manageBilling(_ command: CDVInvokedUrlCommand) {
@@ -1067,28 +1118,16 @@ public class InAppPurchase: CDVPlugin {
     }
 
     @objc func appStoreReceipt(_ command: CDVInvokedUrlCommand) {
-        log("appStoreReceipt: Reading app store receipt...")
-
-        // Try legacy on-disk receipt first
-        if let args = loadLegacyReceiptArgs() {
-            log("appStoreReceipt: Returning legacy receipt")
-            let result = CDVPluginResult(status: .ok, messageAs: args)
-            commandDelegate.send(result, callbackId: command.callbackId)
-            return
-        }
-
-        // StoreKit 2 fallback: return empty receipt (JWS tokens are sent per-transaction)
-        log("appStoreReceipt: No legacy receipt — returning empty receipt for StoreKit 2 JWS flow")
+        log("appStoreReceipt: Returning empty receipt (StoreKit 2 — JWS tokens used per-transaction)")
         let args = buildReceiptArgs(base64Receipt: "")
         let result = CDVPluginResult(status: .ok, messageAs: args)
         commandDelegate.send(result, callbackId: command.callbackId)
     }
 
     @objc func appStoreRefreshReceipt(_ command: CDVInvokedUrlCommand) {
-        log("appStoreRefreshReceipt: Refreshing receipt...")
+        log("appStoreRefreshReceipt: Syncing with Apple...")
 
         Task {
-            // Sync with Apple (refreshes the on-disk receipt if possible)
             do {
                 try await AppStore.sync()
                 self.log("appStoreRefreshReceipt: Sync completed")
@@ -1096,16 +1135,8 @@ public class InAppPurchase: CDVPlugin {
                 self.log("appStoreRefreshReceipt: AppStore.sync() failed — \(error.localizedDescription) (continuing)")
             }
 
-            // Try legacy receipt after sync
-            if let args = self.loadLegacyReceiptArgs() {
-                self.log("appStoreRefreshReceipt: Returning refreshed legacy receipt")
-                let result = CDVPluginResult(status: .ok, messageAs: args)
-                self.commandDelegate.send(result, callbackId: command.callbackId)
-                return
-            }
-
-            // StoreKit 2 fallback: return empty receipt (JWS tokens are sent per-transaction)
-            self.log("appStoreRefreshReceipt: No legacy receipt after sync — returning empty receipt for StoreKit 2 JWS flow")
+            // Always return empty receipt — JWS tokens are sent per-transaction
+            self.log("appStoreRefreshReceipt: Returning empty receipt (StoreKit 2 — JWS tokens used per-transaction)")
             let args = self.buildReceiptArgs(base64Receipt: "")
             let result = CDVPluginResult(status: .ok, messageAs: args)
             self.commandDelegate.send(result, callbackId: command.callbackId)
@@ -1125,6 +1156,8 @@ public class InAppPurchase: CDVPlugin {
                 for await result in Transaction.currentEntitlements {
                     do {
                         let transaction = try self.checkVerified(result)
+                        // Environment filter: skip transactions from wrong environment
+                        guard self.isMatchingEnvironment(transaction) else { continue }
                         let jwsRepresentation = result.jwsRepresentation
 
                         // Emit restore-specific callback with JWS token
@@ -1226,7 +1259,7 @@ public class InAppPurchase: CDVPlugin {
             "title": product.displayName,
             "description": product.description,
             "price": product.displayPrice,
-            "priceMicros": Int(truncating: product.price as NSNumber) * 1000000,
+            "priceMicros": NSDecimalNumber(decimal: product.price).multiplying(byPowerOf10: 6).intValue,
             "currency": product.priceFormatStyle.currencyCode
         ]
 
@@ -1290,7 +1323,7 @@ public class InAppPurchase: CDVPlugin {
     private func discountToDictionary(_ offer: Product.SubscriptionOffer, product: Product) -> [String: Any] {
         var dict: [String: Any] = [
             "price": offer.displayPrice,
-            "priceMicros": Int(truncating: offer.price as NSNumber) * 1000000
+            "priceMicros": NSDecimalNumber(decimal: offer.price).multiplying(byPowerOf10: 6).intValue
         ]
 
         // period is not optional in SubscriptionOffer

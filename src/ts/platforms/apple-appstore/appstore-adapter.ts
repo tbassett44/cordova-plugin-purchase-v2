@@ -344,9 +344,10 @@ namespace CdvPurchase {
                             this.receiptsUpdated.call();
                         },
 
-                        restored: async (transactionIdentifier: string, productId: string) => {
-                            this.log.info('restore: ' + transactionIdentifier + ' - ' + productId);
-                            await this.upsertTransaction(productId, transactionIdentifier, TransactionState.APPROVED);
+                        restored: async (transactionIdentifier: string, productId: string, originalTransactionIdentifier?: string, transactionDate?: string, discountId?: string, expirationDate?: string, jwsRepresentation?: string) => {
+                            this.log.info('restore: id:' + transactionIdentifier + ' product:' + productId + ' originalTransaction:' + originalTransactionIdentifier + ' - date:' + transactionDate + ' - discount:' + discountId + ' - expires:' + expirationDate + ' - hasJWS:' + !!jwsRepresentation);
+                            const transaction = await this.upsertTransaction(productId, transactionIdentifier, TransactionState.APPROVED);
+                            transaction.refresh(productId, originalTransactionIdentifier, transactionDate, discountId, expirationDate, jwsRepresentation);
                             this.receiptsUpdated.call();
                         },
 
@@ -606,6 +607,25 @@ namespace CdvPurchase {
             }
 
             async order(offer: Offer, additionalData: CdvPurchase.AdditionalData): Promise<undefined | IError> {
+
+                // Flush stale APPROVED transactions before placing a new order.
+                // If a previous purchase flow was interrupted (app closed, sheet
+                // dismissed while native was still processing), the receipt may
+                // contain APPROVED transactions that were never verified/finished.
+                // These cause the approved callback to fire immediately instead of
+                // showing the native payment sheet for the new product.
+                if (this._receipt) {
+                    const stale = this._receipt.transactions.filter(t =>
+                        t.state === TransactionState.APPROVED
+                        && t.transactionId !== APPLICATION_VIRTUAL_TRANSACTION_ID
+                    );
+                    for (const t of stale) {
+                        this.log.info('order: finishing stale approved transaction '
+                            + t.transactionId + ' product:' + (t.products[0]?.id));
+                        await this.finish(t);
+                    }
+                }
+
                 let resolved = false;
                 return new Promise(resolve => {
                     const callResolve = (result: undefined | IError) => {
@@ -719,12 +739,25 @@ namespace CdvPurchase {
                 const skReceipt = receipt as SKApplicationReceipt;
                 let applicationReceipt = skReceipt.nativeData;
 
-                // Get the latest transaction (which may have a JWS token from StoreKit 2)
-                const transaction = skReceipt.transactions.slice(-1)[0] as (SKTransaction | undefined);
+                // Log transaction state for debugging
+                const allTransactions = skReceipt.transactions as SKTransaction[];
+                const withJws = allTransactions.filter(t => t.jwsRepresentation);
+                this.log.info('receiptValidationBody: ' + allTransactions.length + ' transaction(s), ' + withJws.length + ' with JWS');
+                allTransactions.forEach((t, i) => {
+                    this.log.info('receiptValidationBody: tx[' + i + '] id=' + t.transactionId
+                        + ' state=' + t.state
+                        + ' product=' + (t.products[0]?.id ?? 'none')
+                        + ' hasJWS=' + !!t.jwsRepresentation);
+                });
+
+                // Get the latest transaction that has a JWS token (StoreKit 2).
+                // Filter first so that finished/restored transactions without JWS
+                // don't shadow the real purchase transaction at the end of the array.
+                const transaction = withJws.slice(-1)[0] as (SKTransaction | undefined);
 
                 // StoreKit 2: If we have a JWS token, use it directly (no need for legacy appStoreReceipt)
                 if (transaction?.jwsRepresentation) {
-                    this.log.info('Using StoreKit 2 JWS token for validation');
+                    this.log.info('receiptValidationBody: ✅ Using StoreKit 2 JWS path — tx=' + transaction.transactionId + ' product=' + (transaction.products[0]?.id ?? 'none'));
                     return {
                         id: applicationReceipt.bundleIdentifier,
                         type: ProductType.APPLICATION,
@@ -739,7 +772,9 @@ namespace CdvPurchase {
                 }
 
                 // StoreKit 1 fallback: Try to load the legacy appStoreReceipt
+                this.log.warn('receiptValidationBody: ⚠️ No transaction with JWS found — falling through to StoreKit 1 fallback');
                 if (this.forceReceiptReload) {
+                    this.log.info('receiptValidationBody: forceReceiptReload=true — reloading appStoreReceipt');
                     const nativeData = await this.loadAppStoreReceipt();
                     this.forceReceiptReload = false;
                     if (nativeData) {
@@ -748,16 +783,17 @@ namespace CdvPurchase {
                     }
                 }
                 if (!skReceipt.nativeData.appStoreReceipt) {
-                    this.log.info('Cannot prepare the receipt validation body, because appStoreReceipt is missing. Refreshing...');
+                    this.log.info('receiptValidationBody: appStoreReceipt is missing — refreshing...');
                     const result = await this.refreshReceipt();
                     if (!result || 'isError' in result) {
-                        this.log.warn('Failed to refresh receipt, cannot run receipt validation.');
+                        this.log.warn('receiptValidationBody: Failed to refresh receipt, cannot run receipt validation.');
                         if (result) this.log.error(result);
                         return;
                     }
-                    this.log.info('Receipt refreshed.');
+                    this.log.info('receiptValidationBody: Receipt refreshed.');
                     applicationReceipt = result;
                 }
+                this.log.info('receiptValidationBody: returning StoreKit 1 body, appStoreReceipt length=' + (applicationReceipt.appStoreReceipt?.length ?? 0));
                 return {
                     id: applicationReceipt.bundleIdentifier,
                     type: ProductType.APPLICATION,

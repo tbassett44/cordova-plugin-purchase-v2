@@ -129,6 +129,24 @@ if(platform=='actualize'){/* ACTUALIZE ENVIRONMENT INIT (DO NOT REMOVE) */
             });
         });
     }
+    tools.getEntitlementByOriginalTransactionId= async function(originalTransactionId) {
+        return new Promise((resolve, reject) => {
+            var postfix='';
+            if(use_environment=='sandbox') postfix='_sandbox';
+            tools.db.connect(tools.conf.dbname, 'iap_entitlement'+postfix, async function(coll) {
+                try {
+                    const doc = await coll.findOne(
+                        { 'raw.originalTransactionId': originalTransactionId },
+                        { sort: { _id: -1 } }
+                    );
+                    resolve(doc);
+                } catch (err) {
+                    console.error('[IAP:DB] Error getting entitlement by originalTransactionId:', err);
+                    reject(err);
+                }
+            });
+        });
+    }
     tools.upsertEntitlement= async function(userId, patch) {
         patch.uid=userId;
         var postfix='';
@@ -151,6 +169,12 @@ if(platform=='actualize'){/* ACTUALIZE ENVIRONMENT INIT (DO NOT REMOVE) */
     }
     var tools = {
         getEntitlement: async function(userId) {
+            return new Promise((resolve, reject) => {
+                //your DB logic for getting entitlement, you will want to make an api call to separate logic
+                resolve(null);
+            })
+        },
+        getEntitlementByOriginalTransactionId: async function(userId) {
             return new Promise((resolve, reject) => {
                 //your DB logic for getting entitlement, you will want to make an api call to separate logic
                 resolve(null);
@@ -621,6 +645,14 @@ var iap={
     getEntitlement: tools.getEntitlement,
 
     /**
+     * Look up an entitlement by originalTransactionId (fallback when appAccountToken is missing,
+     * e.g. offer code redemptions). Returns the most recent entitlement with that originalTransactionId.
+     * @param {string} originalTransactionId
+     * @returns {Promise<object|null>}
+     */
+    getEntitlementByOriginalTransactionId: tools.getEntitlementByOriginalTransactionId,
+
+    /**
      * True when an Apple entitlement status should still grant ownership.
      * @param {string|null|undefined} status
      * @returns {boolean}
@@ -803,6 +835,8 @@ var iap={
         const priceMicros = transactionInfo?.price || null;
         const currency = transactionInfo?.currency || null;
         const offerDiscountType = transactionInfo?.offerDiscountType || null;
+        const offerIdentifier = transactionInfo?.offerIdentifier || null;
+        const offerType = transactionInfo?.offerType ?? null;
 
         // Renewal info fields — key for upgrade/downgrade (DID_CHANGE_RENEWAL_PRODUCT events)
         // renewalPrice: price at next renewal in milliunits (may differ from current priceMicros after a plan switch)
@@ -835,7 +869,7 @@ var iap={
         return {
             notificationType, subtype, status, productId: effectiveProductId, originalTransactionId,
             transactionId, appAccountToken, expiresDate, purchaseDate, environment,
-            priceMicros, currency, offerDiscountType,
+            priceMicros, currency, offerDiscountType, offerIdentifier, offerType,
             renewalPrice, autoRenewProductId, autoRenewStatus,
             transactionInfo, renewalInfo
         };
@@ -1062,6 +1096,8 @@ var iap={
                         const priceMicros = tx.price || null;
                         const currency = tx.currency || null;
                         const offerDiscountType = tx.offerDiscountType || null;
+                        const offerIdentifier = tx.offerIdentifier || null;
+                        const offerType = tx.offerType ?? null;
 
                         tools.log('[IAP:APPLE:VALIDATE] Decoded transaction:', {
                             transactionId: tx.transactionId,
@@ -1073,7 +1109,7 @@ var iap={
                             expiresDate: tx.expiresDate,
                             revocationDate: tx.revocationDate,
                             appAccountToken: tx.appAccountToken,
-                            priceMicros, currency, offerDiscountType
+                            priceMicros, currency, offerDiscountType, offerIdentifier, offerType
                         });
 
                         const purchaseDate = tx.purchaseDate ? new Date(tx.purchaseDate).getTime() : null;
@@ -1111,6 +1147,8 @@ var iap={
                             priceMicros:priceMicros,
                             currency:currency,
                             offerDiscountType:offerDiscountType,
+                            offerIdentifier:offerIdentifier,
+                            offerType:offerType,
                             ...preservedRenewalFields,
                             raw: {
                                 source:'validate',
@@ -1123,7 +1161,9 @@ var iap={
                                 verified: true,
                                 priceMicros: priceMicros,
                                 currency: currency,
-                                offerDiscountType: offerDiscountType
+                                offerDiscountType: offerDiscountType,
+                                offerIdentifier: offerIdentifier,
+                                offerType: offerType
                             }
                         });
                         tools.log('[IAP:APPLE:VALIDATE] Entitlement saved to database for userId:', userId);
@@ -1343,58 +1383,104 @@ var iap={
             // appAccountToken is a UUID that encodes the userId (each char = 2 hex digits)
             const rawAppAccountToken = norm.appAccountToken;
             const decodedUserId = rawAppAccountToken ? iap.uuidToUserId(rawAppAccountToken) : null;
-            const userId = decodedUserId || req.query.userId;
+            let userId = decodedUserId || req.query.userId;
             tools.log(`[IAP:WEBHOOK:APPLE] appAccountToken: ${rawAppAccountToken || '(not set)'}`);
             tools.log(`[IAP:WEBHOOK:APPLE] decoded userId: ${decodedUserId || '(none)'}`);
+
+            // Fallback: if no appAccountToken (e.g. offer code redemptions), look up user
+            // by originalTransactionId from a previously saved entitlement record
+            if (!userId && norm.originalTransactionId) {
+                tools.log(`[IAP:WEBHOOK:APPLE] No appAccountToken — looking up user by originalTransactionId: ${norm.originalTransactionId}`);
+                try {
+                    const existingEnt = await iap.getEntitlementByOriginalTransactionId(norm.originalTransactionId);
+                    if (existingEnt && existingEnt.uid) {
+                        userId = existingEnt.uid;
+                        tools.log(`[IAP:WEBHOOK:APPLE] Found userId via originalTransactionId fallback: ${userId}`);
+                    }
+                } catch (lookupErr) {
+                    tools.log(`[IAP:WEBHOOK:APPLE] WARNING: originalTransactionId lookup failed: ${lookupErr.message}`);
+                }
+            }
+
             tools.log(`[IAP:WEBHOOK:APPLE] final userId: ${userId || '(not found)'}`);
 
-            if (!userId) {
-                console.warn("[IAP:WEBHOOK:APPLE] No userId found - entitlement NOT saved");
-                tools.log('[IAP:WEBHOOK:APPLE] ============= END (200) =============\n');
-                return res.json({ ok: true, note: "No userId; not stored" });
-            }
-
-            const expiresAt = norm.expiresDate ? new Date(norm.expiresDate).getTime() : null;
-
-            // If productId is missing, try to get it from existing entitlement
-            let productId = norm.productId;
-            if (!productId) {
-                const existingEntitlement = await iap.getEntitlement(String(userId));
-                productId = existingEntitlement?.productId || "unknown";
-            }
-
-            await iap.upsertEntitlement(String(userId), {
-                source: "apple",
-                productId: norm.productId || productId,
-                status: norm.status,
-                expiresAt,
-                // Price fields (Apple milliunits - divide by 1000 for actual amount)
-                priceMicros: (norm.renewalPrice) ? norm.renewalPrice : norm.priceMicros,
-                currency: norm.currency,
-                offerDiscountType: norm.offerDiscountType,
-                // Renewal / plan-change fields (populated on DID_CHANGE_RENEWAL_PRODUCT, etc.)
-                renewalPrice: norm.renewalPrice,
-                autoRenewProductId: norm.autoRenewProductId,
-                autoRenewStatus: norm.autoRenewStatus,
-                raw: {
-                    source: 'webhook',
-                    transactionId: norm.transactionId, originalTransactionId: norm.originalTransactionId,
-                    notificationType: norm.notificationType, subtype: norm.subtype,
-                    environment: norm.environment, verifiedEnv, lastUpdated: new Date().toISOString(), verified: true,
-                    priceMicros: norm.priceMicros, currency: norm.currency, offerDiscountType: norm.offerDiscountType,
-                    renewalPrice: norm.renewalPrice, autoRenewProductId: norm.autoRenewProductId, autoRenewStatus: norm.autoRenewStatus
+            // Helper: save entitlement + transaction for a resolved userId
+            const saveWebhookEntitlement = async (resolvedUserId, logPrefix, errorMsg) => {
+                const expiresAt = norm.expiresDate ? new Date(norm.expiresDate).getTime() : null;
+                let productId = norm.productId;
+                if (!productId) {
+                    const existingEntitlement = await iap.getEntitlement(String(resolvedUserId));
+                    productId = existingEntitlement?.productId || "unknown";
                 }
-            });
+                await iap.upsertEntitlement(String(resolvedUserId), {
+                    source: "apple",
+                    productId: norm.productId || productId,
+                    status: norm.status,
+                    expiresAt,
+                    priceMicros: (norm.renewalPrice) ? norm.renewalPrice : norm.priceMicros,
+                    currency: norm.currency,
+                    offerDiscountType: norm.offerDiscountType,
+                    offerIdentifier: norm.offerIdentifier,
+                    offerType: norm.offerType,
+                    renewalPrice: norm.renewalPrice,
+                    autoRenewProductId: norm.autoRenewProductId,
+                    autoRenewStatus: norm.autoRenewStatus,
+                    raw: {
+                        source: 'webhook',
+                        transactionId: norm.transactionId, originalTransactionId: norm.originalTransactionId,
+                        notificationType: norm.notificationType, subtype: norm.subtype,
+                        environment: norm.environment, verifiedEnv, lastUpdated: new Date().toISOString(), verified: true,
+                        priceMicros: norm.priceMicros, currency: norm.currency, offerDiscountType: norm.offerDiscountType,
+                        offerIdentifier: norm.offerIdentifier, offerType: norm.offerType,
+                        renewalPrice: norm.renewalPrice, autoRenewProductId: norm.autoRenewProductId, autoRenewStatus: norm.autoRenewStatus,
+                        ...(errorMsg ? { _error: errorMsg } : {})
+                    }
+                });
+                tools.log(`${logPrefix} ${errorMsg ? '⚠️' : '✅'} Entitlement saved: userId=${resolvedUserId}, status=${norm.status}, productId=${productId}${errorMsg ? ', _error=' + errorMsg : ''}`);
+                if (norm.transactionId && !errorMsg) {
+                    iap.fetchAndSaveTransaction(norm.transactionId, resolvedUserId, renewalInfo);
+                }
+            };
 
-            tools.log(`[IAP:WEBHOOK:APPLE] ✅ Entitlement saved to database: userId=${userId}, status=${norm.status}, productId=${productId}`);
+            if (!userId) {
+                if (norm.originalTransactionId) {
+                    // Offer code race condition: webhook arrived before client /validate.
+                    // Respond 200 to Apple immediately, then retry in the background.
+                    tools.log('[IAP:WEBHOOK:APPLE] No userId yet — scheduling deferred retry for originalTransactionId lookup');
+                    tools.log('[IAP:WEBHOOK:APPLE] ============= END (200 — deferred) =============\n');
+                    res.json({ ok: true, note: "Deferred: waiting for validate to establish userId mapping" });
 
-            // Persist the individual billing event to the transaction ledger (non-fatal).
-            // Pass renewalInfo so fetchAndSaveTransaction can record the upcoming renewal price
-            // and autoRenewProductId — critical for downgrades where there is no charge NOW
-            // but the next renewal price and target product differ from the current transaction.
-            if (norm.transactionId) {
-                iap.fetchAndSaveTransaction(norm.transactionId, userId, renewalInfo);
+                    // Background retry loop (detached from HTTP response)
+                    (async () => {
+                        const maxAttempts = 6;
+                        const intervalMs = 10000;
+                        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                            await new Promise(r => setTimeout(r, intervalMs));
+                            tools.log(`[IAP:WEBHOOK:APPLE:DEFERRED] Attempt ${attempt}/${maxAttempts} — looking up originalTransactionId: ${norm.originalTransactionId}`);
+                            try {
+                                const ent = await iap.getEntitlementByOriginalTransactionId(norm.originalTransactionId);
+                                if (ent && ent.uid) {
+                                    await saveWebhookEntitlement(ent.uid, '[IAP:WEBHOOK:APPLE:DEFERRED]');
+                                    return;
+                                }
+                                tools.log(`[IAP:WEBHOOK:APPLE:DEFERRED] Attempt ${attempt} — no mapping found yet`);
+                            } catch (err) {
+                                tools.log(`[IAP:WEBHOOK:APPLE:DEFERRED] Attempt ${attempt} error: ${err.message}`);
+                            }
+                        }
+                        tools.log(`[IAP:WEBHOOK:APPLE:DEFERRED] ❌ Gave up after ${maxAttempts} attempts for originalTransactionId: ${norm.originalTransactionId}`);
+                        // Save the entitlement with a placeholder userId so the webhook data is not lost
+                        await saveWebhookEntitlement('unknown_' + norm.originalTransactionId, '[IAP:WEBHOOK:APPLE:DEFERRED]', 'userId not found');
+                    })();
+                    return;
+                }
+                console.warn("[IAP:WEBHOOK:APPLE] No userId found - saving entitlement with error");
+                await saveWebhookEntitlement('unknown_' + (norm.transactionId || 'no_txn'), '[IAP:WEBHOOK:APPLE]', 'userId not found');
+                tools.log('[IAP:WEBHOOK:APPLE] ============= END (200) =============\n');
+                return res.json({ ok: true, note: "No userId; stored with _error" });
             }
+
+            await saveWebhookEntitlement(userId, '[IAP:WEBHOOK:APPLE]');
 
             tools.log('[IAP:WEBHOOK:APPLE] ============= END (200) =============\n');
             res.json({ ok: true });
@@ -1524,6 +1610,8 @@ var iap={
                         const priceMicros = tx.price || null;
                         const currency = tx.currency || null;
                         const offerDiscountType = tx.offerDiscountType || null;
+                        const offerIdentifier = tx.offerIdentifier || null;
+                        const offerType = tx.offerType ?? null;
 
                         const expiresAt = tx.expiresDate ? new Date(tx.expiresDate).getTime() : null;
                         let status = 'active';
@@ -1540,6 +1628,8 @@ var iap={
                                 priceMicros,
                                 currency,
                                 offerDiscountType,
+                                offerIdentifier,
+                                offerType,
                                 raw: {
                                     transactionId: tx.transactionId,
                                     originalTransactionId: tx.originalTransactionId,
@@ -1551,7 +1641,9 @@ var iap={
                                     restoredAt: new Date().toISOString(),
                                     priceMicros,
                                     currency,
-                                    offerDiscountType
+                                    offerDiscountType,
+                                    offerIdentifier,
+                                    offerType
                                 }
                             });
 
